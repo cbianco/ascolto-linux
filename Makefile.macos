@@ -17,9 +17,11 @@ C_SRCS   := src/wav_audio.c \
             src/vad.c \
             src/macos/whistle_engine.c \
             src/macos/diarizer.c \
+            src/macos/recap.c \
             src/session.c \
             src/live_session.c \
             src/capture_buffer.c \
+            src/audio_processing.c \
             src/room_bench.c
 
 OBJC_SRCS := src/capture_macos.c
@@ -27,6 +29,7 @@ OBJC_SRCS := src/capture_macos.c
 BIN_DIR  := bin
 HARNESS  := $(BIN_DIR)/ascolto-harness
 REGRESSION := $(BIN_DIR)/ascolto-regression
+CONTROL  := $(BIN_DIR)/ascoltoctl
 APP_BIN  := $(BIN_DIR)/ascolto
 APP_BUNDLE := $(BIN_DIR)/Ascolto.app
 
@@ -44,16 +47,22 @@ fixtures:
 	@chmod +x scripts/gen_fixtures.sh
 	@./scripts/gen_fixtures.sh
 
-build: deps
+$(CONTROL): tools/ascoltoctl.c
+	@mkdir -p $(BIN_DIR)
+	$(CC) -std=c11 -Wall -Wextra -O2 $< -o $@
+
+build: deps $(CONTROL)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(OBJCFLAGS) -x objective-c $(C_SRCS) $(OBJC_SRCS) src/harness_main.c -x none $(LDFLAGS) -o $(HARNESS)
-	$(CC) $(OBJCFLAGS) -x objective-c $(C_SRCS) $(OBJC_SRCS) src/menubar_macos.m src/app_main.c -x none $(LDFLAGS) -o $(APP_BIN)
+	$(CC) $(OBJCFLAGS) -x objective-c $(C_SRCS) $(OBJC_SRCS) src/macos/control.m src/menubar_macos.m src/app_main.c -x none $(LDFLAGS) -o $(APP_BIN)
 	$(CC) $(OBJCFLAGS) -x objective-c $(C_SRCS) tests/regression_main.c -x none $(LDFLAGS) -o $(REGRESSION)
+	$(CC) $(OBJCFLAGS) -x objective-c $(C_SRCS) src/macos/control.m tests/control_main.m -x none $(LDFLAGS) -o $(BIN_DIR)/ascolto-control-test
 
 bundle: build
 	@mkdir -p $(APP_BUNDLE)/Contents/MacOS $(APP_BUNDLE)/Contents/Resources
 	@cp $(APP_BIN) $(APP_BUNDLE)/Contents/MacOS/Ascolto
 	@cp models/whistle.cact $(APP_BUNDLE)/Contents/Resources/whistle.cact
+	@cp scripts/recap.py scripts/requirements-recap.txt $(APP_BUNDLE)/Contents/Resources/
 	@printf '%s\n' \
 		'<?xml version="1.0" encoding="UTF-8"?>' \
 		'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
@@ -74,10 +83,11 @@ bundle: build
 		'</plist>' > $(APP_BUNDLE)/Contents/Info.plist
 	@codesign --force --deep --sign - $(APP_BUNDLE)
 
-test: build bundle
+test: build bundle test-portable
 	@test -f tests/fixtures/spk3_turn1.wav || $(MAKE) fixtures
 	./$(HARNESS) test
 	./$(REGRESSION)
+	./$(BIN_DIR)/ascolto-control-test
 	./$(APP_BIN) --config /tmp/ascolto-test/smoke_config.json --smoke-test
 
 room-bench: build

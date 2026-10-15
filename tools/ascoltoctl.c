@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,12 +10,18 @@
 #include <unistd.h>
 
 static void default_socket_path(char *buf, size_t cap) {
+#ifdef __APPLE__
+    const char *runtime = getenv("TMPDIR");
+    if (runtime && *runtime) snprintf(buf, cap, "%s/ascolto.sock", runtime);
+    else snprintf(buf, cap, "/tmp/ascolto-%d.sock", (int)getuid());
+#else
     const char *xdg = getenv("XDG_RUNTIME_DIR");
     if (xdg && *xdg) {
         snprintf(buf, cap, "%s/ascolto.sock", xdg);
     } else {
         snprintf(buf, cap, "/tmp/ascolto-%d.sock", (int)getuid());
     }
+#endif
 }
 
 int main(int argc, char **argv) {
@@ -29,6 +36,14 @@ int main(int argc, char **argv) {
 
     if (arg_idx >= argc || strcmp(argv[arg_idx], "-h") == 0 || strcmp(argv[arg_idx], "--help") == 0) {
         printf("Usage: %s [-s <socket_path>] <COMMAND> [ARGS...]\n\n"
+#ifdef __APPLE__
+               "Commands (macOS):\n"
+               "  STATUS | GET_TRAY_STATE\n"
+               "  START | STOP | PAUSE | RESUME\n"
+               "  SET_AUTO_MIC | SET_SAVE_AUDIO | SET_CLOUD_RECAP | SET_RECAP_TTS <on|off>\n"
+               "  SET_LANG <auto|it|en|es|fr|de|nl|pl>\n"
+               "  RECAP | MAKE_MP3 | PREPARE_RECAP [transcript.md]\n",
+#else
                "Commands:\n"
                "  STATUS\n"
                "  START | STOP | TOGGLE | PAUSE | RESUME\n"
@@ -43,6 +58,7 @@ int main(int argc, char **argv) {
                "  INJECT_SYNTH_SPEECH <MIC|SYS> <f0_hz> <f1_hz> <f2_hz> <dur_ms> <text>\n"
                "  LIST_DEVICES | LIST_SPEAKERS | LIST_SEGMENTS | GET_TRAY_STATE | GET_EVENTS\n"
                "  QUIT\n",
+#endif
                argv[0]);
         return (arg_idx >= argc) ? 1 : 0;
     }
@@ -84,11 +100,23 @@ int main(int argc, char **argv) {
     }
 
     char buf[8192];
+    char response[8192] = {0};
+    size_t response_size = 0;
     ssize_t n;
     while ((n = read(fd, buf, sizeof(buf) - 1)) > 0) {
         buf[n] = '\0';
+        size_t copied = (size_t)n < sizeof(response) - 1 - response_size ? (size_t)n : sizeof(response) - 1 - response_size;
+        memcpy(response + response_size, buf, copied);
+        response_size += copied;
         fputs(buf, stdout);
     }
     close(fd);
+    if (n < 0 || !response_size) return 1;
+    const char *ok = strstr(response, "\"ok\"");
+    if (ok && (ok = strchr(ok + 4, ':'))) {
+        ok++;
+        while (isspace((unsigned char)*ok)) ok++;
+        if (!strncmp(ok, "false", 5)) return 1;
+    }
     return 0;
 }

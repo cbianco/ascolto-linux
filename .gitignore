@@ -36,3 +36,6 @@ tests/*.sample.txt
 tests/*-hang.txt
 tests/audio-feedback.json
 __pycache__/
+
+# Optional isolated Python environment for recap dependencies
+.venv/

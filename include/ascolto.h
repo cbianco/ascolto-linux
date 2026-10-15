@@ -1,6 +1,9 @@
 #ifndef ASCOLTO_H
 #define ASCOLTO_H
 
+#include "ascolto/audio_types.h"
+#include "ascolto/audio_processing.h"
+#include "ascolto/capture_buffer.h"
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -11,7 +14,6 @@
 extern "C" {
 #endif
 
-#define ASCOLTO_SAMPLE_RATE 16000
 #define ASCOLTO_WHISTLE_EMBED_DIM 512
 #define ASCOLTO_VOICEPRINT_DIM 16
 #define ASCOLTO_MAX_WORDS 128
@@ -23,10 +25,7 @@ extern "C" {
 /* --------------------------------------------------------------------------
  * Audio Stream & Channel Types
  * -------------------------------------------------------------------------- */
-typedef enum {
-    ASCOLTO_CHANNEL_MIC = 0, /* Local microphone ("ME" / "Io") */
-    ASCOLTO_CHANNEL_SYS = 1  /* System audio input/loopback ("Others") */
-} ascolto_channel_t;
+
 
 const char* ascolto_channel_name(ascolto_channel_t ch);
 
@@ -50,6 +49,10 @@ float ascolto_audio_rms_db(const float* samples, int num_samples);
 typedef struct {
     bool auto_trigger_mic;          /* Automatically start/stop when mic is active */
     bool paused;                    /* User manually paused auto-trigger */
+    bool cloud_recap;              /* Opt-in cloud audio transcription and recap */
+    bool recap_tts;                /* Optional cloud MP3 rendering */
+    char control_socket[512];      /* Private local CLI socket */
+    char recap_python[512];        /* Interpreter with scripts/requirements-recap.txt installed */
     bool save_audio;                /* Save compressed stereo .m4a (L=MIC, R=SYS) for reprocessing */
     char language[16];              /* "auto", "it", "en", "de", "fr", "es", "nl", "pl" */
     uint32_t mic_device_id;         /* 0 = system default input device */
@@ -156,16 +159,6 @@ typedef struct {
     double end_s;
     float rms_db;
 } ascolto_vad_segment_t;
-
-typedef struct {
-    float energy_threshold_db;  /* Default: -42.0 dB */
-    double min_speech_s;        /* Default: 0.25 s */
-    double min_silence_s;       /* Default: 0.35 s */
-    double max_segment_s;       /* Default: 25.0 s */
-    double pad_s;               /* Default: 0.12 s */
-} ascolto_vad_config_t;
-
-ascolto_vad_config_t ascolto_vad_default_config(void);
 
 int ascolto_vad_segment_buffer(
     const float* samples,
@@ -341,49 +334,6 @@ typedef enum {
 
 const char* ascolto_app_state_label(ascolto_app_state_t st);
 
-/* Online streaming VAD per channel (accumulates live chunks and flushes completed turns) */
-typedef struct {
-    ascolto_channel_t channel;
-    ascolto_vad_config_t cfg;
-    float* buffer;
-    int capacity;
-    int write_pos;
-    bool in_speech;
-    int speech_start_sample;
-    int last_voiced_sample;
-    int64_t total_samples_processed;
-} ascolto_online_vad_t;
-
-int ascolto_online_vad_init(ascolto_online_vad_t* v, ascolto_channel_t channel, const ascolto_vad_config_t* cfg);
-void ascolto_online_vad_reset(ascolto_online_vad_t* v);
-void ascolto_online_vad_free(ascolto_online_vad_t* v);
-
-typedef void (*ascolto_vad_turn_cb_t)(
-    ascolto_channel_t channel,
-    const float* pcm,
-    int num_samples,
-    double start_s,
-    double end_s,
-    float rms_db,
-    void* userdata
-);
-
-/* Feeds 16kHz mono float samples into online VAD; invokes cb whenever a speech turn completes */
-void ascolto_online_vad_feed(
-    ascolto_online_vad_t* v,
-    const float* samples,
-    int num_samples,
-    ascolto_vad_turn_cb_t cb,
-    void* userdata
-);
-
-/* Flushes any remaining speech turn at end of call */
-void ascolto_online_vad_flush(
-    ascolto_online_vad_t* v,
-    ascolto_vad_turn_cb_t cb,
-    void* userdata
-);
-
 typedef struct {
     double start_s;
     double end_s;
@@ -431,6 +381,7 @@ typedef struct {
     ascolto_online_vad_t vad_sys;
 
     ascolto_app_state_t state;
+    bool session_save_audio;
     bool manual_override_active;
     bool manual_stop_for_current_call;
     bool mic_hardware_active;
@@ -492,6 +443,13 @@ void ascolto_live_app_on_mic_hardware_change(ascolto_live_app_t* app, bool mic_a
 void ascolto_live_app_set_paused(ascolto_live_app_t* app, bool paused);
 void ascolto_live_app_set_auto_trigger(ascolto_live_app_t* app, bool enabled);
 void ascolto_live_app_set_save_audio(ascolto_live_app_t* app, bool enabled);
+void ascolto_live_app_set_cloud_recap(ascolto_live_app_t* app, bool enabled);
+void ascolto_live_app_set_recap_tts(ascolto_live_app_t* app, bool enabled);
+int ascolto_recap_start(const ascolto_config_t* config, const char* md_path, bool mp3_only, bool prepare_only);
+void ascolto_archive_wait(void);
+int ascolto_archive_finalize(const ascolto_config_t* config, const char* mic_raw, const char* sys_raw,
+                            const char* archive, const char* md_path);
+
 void ascolto_live_app_set_language(ascolto_live_app_t* app, const char* lang);
 void ascolto_live_app_set_devices(ascolto_live_app_t* app, uint32_t mic_dev_id, uint32_t sys_dev_id);
 void ascolto_live_app_set_diarizer_threshold(ascolto_live_app_t* app, float threshold);
@@ -520,20 +478,6 @@ bool ascolto_is_lexical_echo(const char* mic_text, const char* sys_text);
 
 /* Deterministic acoustic rooms exercising the production live pipeline. */
 int ascolto_run_room_bench(ascolto_whistle_t* whistle, const char* output_dir);
-
-/* Timestamped dual-channel queue. Callers provide synchronization around these operations. */
-typedef struct ascolto_capture_buffer_s ascolto_capture_buffer_t;
-ascolto_capture_buffer_t* ascolto_capture_buffer_create(int capacity);
-void ascolto_capture_buffer_free(ascolto_capture_buffer_t* buffer);
-void ascolto_capture_buffer_reset(ascolto_capture_buffer_t* buffer);
-void ascolto_capture_buffer_push(ascolto_capture_buffer_t* buffer, ascolto_channel_t channel,
-                                 const float* samples, int count, int64_t start_sample);
-int ascolto_capture_buffer_pop(ascolto_capture_buffer_t* buffer, float* mic, float* sys,
-                               int count, bool pad_missing);
-int ascolto_capture_buffer_available(const ascolto_capture_buffer_t* buffer, ascolto_channel_t channel);
-int64_t ascolto_capture_buffer_dropped(const ascolto_capture_buffer_t* buffer);
-int64_t ascolto_capture_buffer_padded(const ascolto_capture_buffer_t* buffer, ascolto_channel_t channel);
-int ascolto_capture_buffer_verify(void);
 
 /* --------------------------------------------------------------------------
  * Real-Time macOS Audio Capture Engine (AudioQueue / CoreAudio)

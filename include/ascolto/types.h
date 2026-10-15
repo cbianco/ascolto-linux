@@ -1,6 +1,7 @@
 #ifndef ASCOLTO_TYPES_H
 #define ASCOLTO_TYPES_H
 
+#include "ascolto/audio_types.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -9,7 +10,6 @@
 extern "C" {
 #endif
 
-#define ASCOLTO_SAMPLE_RATE        16000
 #define ASCOLTO_MAX_SPEAKERS       32
 #define ASCOLTO_EMBED_DIM          128
 #define ASCOLTO_MAX_DEVICES        32
@@ -20,13 +20,11 @@ typedef enum {
     ASCOLTO_STATE_IDLE = 0,
     ASCOLTO_STATE_RECORDING_AUTO = 1,
     ASCOLTO_STATE_RECORDING_MANUAL = 2,
-    ASCOLTO_STATE_PAUSED = 3
+    ASCOLTO_STATE_PAUSED = 3,
+    ASCOLTO_STATE_STOPPING = 4
 } ascolto_state_t;
 
-typedef enum {
-    ASCOLTO_CHANNEL_MIC = 0,
-    ASCOLTO_CHANNEL_SYS = 1
-} ascolto_channel_t;
+
 
 typedef enum {
     ASCOLTO_SENSITIVITY_LOW = 0,

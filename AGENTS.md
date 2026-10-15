@@ -11,7 +11,7 @@ macOS Menu Bar application in C/Obj-C (`bin/Ascolto.app`) that automatically det
 
 ## Commands
 
-- `make test`: builds everything, runs all 10 test suites (`./bin/ascolto-harness test`, 21 checks), including eight acoustic rooms and capture queue/gate boundary verification, plus four concurrency/timeline regressions (`./bin/ascolto-regression`) and the UI smoke test (`./bin/ascolto --smoke-test`). CoreAudio checks and fixture synthesis require access to macOS services outside a restricted sandbox.
+- `make test`: builds everything, runs all 10 test suites (`./bin/ascolto-harness test`, 21 checks), including eight acoustic rooms and capture queue/gate boundary verification, plus four concurrency/timeline regressions (`./bin/ascolto-regression`), portable queue/VAD/echo checks, CLI/socket/archive regressions (`./bin/ascolto-control-test`), and the UI smoke test (`./bin/ascolto --smoke-test`). CoreAudio checks and fixture synthesis require access to macOS services outside a restricted sandbox.
 - `make room-bench`: exercises the production live pipeline with deterministic headphones, speaker bleed, quiet replies, local interruptions, irregular callback sizes, long turns, and three remote speakers. Writes input WAVs, transcripts, and `tests/room-results/metrics.jsonl`; fails on false `ME` turns, lost expected speech, or incorrect speaker identities.
 - `make test-capture`: opt-in real microphone verification using the actual menu start/stop actions and temporary artifacts. Covers three consecutive manual sessions, a five-second hardware startup delay, and a five-second device-inventory query. Checks menu construction within 100ms, action completion during menu tracking, cache population, responsive timers, and stop actions within 100ms. Requires microphone permission; single-session runs have an 18-second timeout and the three-session run has a 32-second timeout.
 - `make run`: packages, ad-hoc signs (`codesign -s -`), and launches `bin/Ascolto.app`.
@@ -20,6 +20,13 @@ macOS Menu Bar application in C/Obj-C (`bin/Ascolto.app`) that automatically det
 - `./bin/ascolto-harness reprocess <call.m4a> --lang it`: splits and re-transcribes a saved stereo `.m4a` call archive (`Ch1=MIC`, `Ch2=SYS`).
 
 ## File Map
+
+- `include/ascolto/audio_types.h`, `capture_buffer.h`, and `audio_processing.h`: shared PCM/channel contract, timestamped queue, streaming VAD, and echo/transcript filter APIs. `src/audio_processing.c` is used by both platforms.
+- `src/audio_queue.c`: portable paired consumer used by Linux; capture producers never run ASR. Linux stop remains STOPPING until all queued PCM and FLAC samples have drained.
+- `src/macos/recap.c`: argument-based process spawning, background archive finalization, atomic archive publication, optional recap launch after compression, and background shutdown wait. Cloud recap and TTS are disabled by default. Original local artifacts are retained.
+- `src/macos/control.m`: owner-only Unix socket; STATUS reads snapshots, mutations run on the menu's serial action queue. Stop this server off-main before freeing the app.
+- `scripts/recap.py`: shared optional cloud worker with Linux directories and macOS M4A adaptation; cloud outputs are separate files. `make recap-deps` installs its isolated environment; `make test-recap` uses mock providers only.
+- `tests/compare_diarizers.c`: repeatable comparison of both retained algorithms on identical fixtures (`make compare-diarizers`). Synthetic results do not establish real-call accuracy.
 
 - `include/ascolto.h`: central C API and state structs.
 - `src/capture_macos.c`: CoreAudio process monitor, `MIC` capture (`AudioQueue` 16kHz float), and `SYS` capture (`CATapDescription` + `AudioHardwareCreateProcessTap` 48kHz->16kHz).

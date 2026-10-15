@@ -7,11 +7,15 @@
 3. Write the recap with the local Claude seat (`claude -p`, no API key).
 4. Optionally render a spoken version of the recap to MP3 with OpenAI TTS.
 
-Works on one per-call folder (<dir>/transcript.md, transcript.jsonl, mic.flac, sys.flac) and leaves
-transcript.md (cloud version), recap.md, recap.spoken.txt and, with --tts, recap.mp3 in it.
+Accepts a Linux call folder or a macOS stereo M4A archive. Preserves local Markdown,
+JSONL and audio; writes transcript.cloud.md/jsonl, recap.md, recap.spoken.txt and
+optionally recap.mp3. Archive adaptation writes a sibling <stem>_recap directory.
 Needs OPENAI_API_KEY in the environment.
 """
 import argparse
+import contextlib
+import fcntl
+from pathlib import Path
 import concurrent.futures as futures
 import difflib
 import json
@@ -30,7 +34,6 @@ import requests
 SAMPLE_RATE = 16000
 FRAME = 480  # 30 ms
 OPENAI = "https://api.openai.com/v1"
-STT_USD_PER_MIN = 0.0045
 
 HALLUCINATION = re.compile(r"^(grazie( a tutti| mille)?|sottotitoli.*|ok|ciao)[.! ]*$", re.IGNORECASE)
 
@@ -218,8 +221,13 @@ def load_whistle_speakers(path):
                     d = json.loads(line)
                 except ValueError:
                     continue
+                if not isinstance(d, dict):
+                    continue
                 if d.get("channel") == "SYS":
-                    segs.append((d["start_sec"], d["end_sec"], d["speaker"]))
+                    start = d.get("start_sec", d.get("start_s"))
+                    end = d.get("end_sec", d.get("end_s"))
+                    if isinstance(start, (int, float)) and isinstance(end, (int, float)) and isinstance(d.get("speaker"), str):
+                        segs.append((start, end, d["speaker"]))
     except OSError:
         pass
     return segs
@@ -236,7 +244,11 @@ def speaker_for(segs, start, end):
 
 def transcribe_channel(flac, label_fn, args, key, tmp, tag):
     wav = os.path.join(tmp, f"{tag}.wav")
-    subprocess.run([args.flac2wav, flac, wav], check=True)
+    if args.flac2wav and os.path.isfile(args.flac2wav):
+        subprocess.run([args.flac2wav, flac, wav], check=True)
+    else:
+        subprocess.run([args.ffmpeg, "-nostdin", "-y", "-v", "error", "-i", flac,
+                        "-ar", str(SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le", wav], check=True)
     samples = read_wav(wav)
     chunks = find_chunks(samples)
     log(f"{tag}: {len(samples) / SAMPLE_RATE:.0f}s of audio, {len(chunks)} speech chunks")
@@ -336,9 +348,67 @@ def notify(title, body):
         pass
 
 
-def main():
+def atomic_text(path, text):
+    """Publish a complete artifact, with owner-only permissions."""
+    path = Path(path)
+    fd, temporary = tempfile.mkstemp(prefix=".ascolto-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def prepare_archive(archive, directory, ffmpeg="ffmpeg"):
+    """Adapt the macOS stereo archive, preserving every original local artifact."""
+    archive, directory = Path(archive).resolve(), Path(directory)
+    if not archive.is_file():
+        raise FileNotFoundError(archive)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    probe = str(Path(ffmpeg).with_name("ffprobe"))
+    metadata = subprocess.run([probe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                               "stream=channels", "-of", "json", str(archive)],
+                              check=True, capture_output=True, text=True)
+    streams = json.loads(metadata.stdout).get("streams", [])
+    if not streams or streams[0].get("channels") != 2:
+        raise ValueError("The macOS archive must have exactly two channels: left MIC, right SYS")
+    with tempfile.TemporaryDirectory(prefix=".prepare-", dir=directory) as temporary:
+        for channel, name in enumerate(("mic", "sys")):
+            output = Path(temporary) / f"{name}.flac"
+            subprocess.run([ffmpeg, "-nostdin", "-y", "-v", "error", "-i", str(archive),
+                            "-af", f"pan=mono|c0=c{channel}", "-ar", str(SAMPLE_RATE),
+                            "-c:a", "flac", str(output)], check=True)
+            os.chmod(output, 0o600)
+        # Both conversions must succeed before either final channel is replaced.
+        for name in ("mic.flac", "sys.flac"):
+            os.replace(Path(temporary) / name, directory / name)
+    for suffix in (".md", ".jsonl"):
+        source = archive.with_suffix(suffix)
+        if source.is_file():
+            atomic_text(directory / ("transcript" + suffix), source.read_text(encoding="utf-8"))
+    atomic_text(directory / "source.json", json.dumps({"archive": str(archive)}, indent=2) + "\n")
+    return str(directory)
+
+
+@contextlib.contextmanager
+def session_lock(directory):
+    directory = Path(directory)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(directory / ".recap.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+def parse_args(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", required=True, help="per-call folder")
+    source = ap.add_mutually_exclusive_group(required=True)
+    source.add_argument("--dir", help="Linux per-call folder")
+    source.add_argument("--archive", help="macOS stereo M4A archive (left MIC, right SYS)")
+    ap.add_argument("--prepare-only", action="store_true", help="adapt artifacts locally; no cloud or credentials")
+    ap.add_argument("--ffmpeg", default="ffmpeg")
     ap.add_argument("--language", default="it")
     ap.add_argument("--keywords", default="")
     ap.add_argument("--tts", action="store_true", help="also render recap.mp3")
@@ -349,9 +419,18 @@ def main():
     ap.add_argument("--stt-model", default="gpt-transcribe")
     ap.add_argument("--claude-model", default="opus")
     ap.add_argument("--flac2wav", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "flac2wav"))
-    args = ap.parse_args()
+    return ap.parse_args(argv)
+
+
+def run(args):
     if args.language == "auto":
         args.language = None
+
+    if args.archive and not args.mp3_only:
+        prepare_archive(args.archive, args.dir, args.ffmpeg)
+    if args.prepare_only:
+        log("local artifacts ready: " + args.dir)
+        return 0
 
     key = get_openai_key()
     if not key:
@@ -405,22 +484,15 @@ def main():
         if "---SPOKEN---" in recap:
             recap, spoken = (part.strip() for part in recap.split("---SPOKEN---", 1))
 
-        # All cloud steps that can fail are done: now replace the live transcript with the cloud one.
-        tmp_md = os.path.join(d, "transcript.md.tmp")
-        with open(tmp_md, "w", encoding="utf-8") as fh:
-            fh.write(f"# Trascrizione ({args.stt_model})\n\n---\n\n")
-            for c in lines:
-                fh.write(f"**[{fmt_time(c['start'])}] [{c['label']}]**: {c['text']}\n\n")
-        os.replace(tmp_md, os.path.join(d, "transcript.md"))
-        with open(os.path.join(d, "recap.md"), "w", encoding="utf-8") as fh:
-            fh.write(f"# Recap\n\n{recap}\n")
+        cloud_md = f"# Cloud transcription ({args.stt_model})\n\n---\n\n"
+        cloud_md += "".join(f"**[{fmt_time(c['start'])}] [{c['label']}]**: {c['text']}\n\n" for c in lines)
+        atomic_text(os.path.join(d, "transcript.cloud.md"), cloud_md)
+        atomic_text(os.path.join(d, "transcript.cloud.jsonl"),
+                    "".join(json.dumps(c, ensure_ascii=False) + "\n" for c in lines))
+        atomic_text(os.path.join(d, "recap.md"), f"# Recap\n\n{recap}\n")
         if spoken:
-            with open(spoken_path, "w", encoding="utf-8") as fh:
-                fh.write(spoken + "\n")
-        jsonl = os.path.join(d, "transcript.jsonl")
-        if os.path.exists(jsonl):
-            os.unlink(jsonl)
-        log(f"done: {len(lines)} segments, about ${seconds / 60 * STT_USD_PER_MIN:.3f} STT, recap by {model}")
+            atomic_text(spoken_path, spoken + "\n")
+        log(f"done: {len(lines)} segments, {seconds:.0f} channel-seconds, recap by {model}")
 
         if args.tts and spoken:
             tts_mp3(key, spoken, mp3_path, args.tts_lang, args.voice)
@@ -431,6 +503,21 @@ def main():
     except Exception as exc:  # noqa: BLE001 - report any failure to the log and the user
         log(f"failed: {exc}")
         notify("Ascolto", f"Recap fallito: {exc}"[:200])
+        return 1
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    if args.archive:
+        args.dir = str(Path(args.archive).resolve().with_suffix("")) + "_recap"
+    try:
+        with session_lock(args.dir):
+            return run(args)
+    except BlockingIOError:
+        log("recap is already running for this session")
+        return 1
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        log(f"cannot prepare recap: {error}")
         return 1
 
 

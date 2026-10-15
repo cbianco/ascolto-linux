@@ -49,6 +49,10 @@ int ascolto_audio_backend_create(
     void *user_data
 );
 
+/* Deterministic injection into the same paired queue used by live PipeWire readers. */
+int ascolto_audio_backend_queue_pcm(ascolto_audio_backend_t *backend, ascolto_channel_t channel,
+                                   const float *pcm, int count, int64_t start_sample);
+
 /* Direct inspection helper to check if any third-party app currently has an active PipeWire mic capture stream. */
 bool ascolto_pipewire_check_mic_active(char *out_app_name, size_t app_name_cap);
 

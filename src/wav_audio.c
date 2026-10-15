@@ -10,17 +10,6 @@ const char* ascolto_channel_name(ascolto_channel_t ch) {
     return (ch == ASCOLTO_CHANNEL_MIC) ? "MIC" : "SYS";
 }
 
-float ascolto_audio_rms_db(const float* samples, int num_samples) {
-    if (!samples || num_samples <= 0) return -100.0f;
-    double sum_sq = 0.0;
-    for (int i = 0; i < num_samples; i++) {
-        sum_sq += (double)samples[i] * (double)samples[i];
-    }
-    double rms = sqrt(sum_sq / (double)num_samples);
-    if (rms < 1e-5) return -100.0f;
-    return (float)(20.0 * log10(rms));
-}
-
 int ascolto_wav_load(const char* path, ascolto_audio_buffer_t* out_buf) {
     if (!path || !out_buf) return -1;
     memset(out_buf, 0, sizeof(*out_buf));

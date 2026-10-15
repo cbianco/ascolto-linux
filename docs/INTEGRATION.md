@@ -23,7 +23,7 @@ The upstream repository has seven commits at the reviewed revision:
 These are additions in Linux's own history, rather than measured changes relative
 to a previous shared version of the macOS project.
 
-## Feature comparison
+## Baseline feature comparison at import
 
 | Area | Linux upstream | Existing macOS implementation | Integration implication |
 | --- | --- | --- | --- |
@@ -31,7 +31,7 @@ to a previous shared version of the macOS project.
 | Capture | Two `pw-record` subprocesses, MIC and sink monitor, 200 ms reads. | AudioQueue MIC and CoreAudio process tap SYS, normalized to 16 kHz. | Feed a common sample contract from native capture. |
 | Audio timeline | Each worker advances its own delivered-sample counter and invokes the core directly. | Timestamped paired queue, 20 ms consumption, missing-channel padding, represented overflow gaps, shutdown drain. | Port the queue and consumer discipline to Linux first. |
 | Local transcription | Needle/Whistle with a serialized engine wrapper, keyword normalization, WAV resampling helpers. | Needle/Whistle with word timestamps, offline reprocessing, live hallucination/repetition filtering. | Define a small result adapter before sharing wrappers. |
-| Acoustic echo | Cloud postprocessing compares MIC and SYS text after retranscription. No equivalent live cross-channel gate found in the Linux ingestion path. | Live SYS-to-MIC energy gate plus lexical/voiceprint checks, preserving quiet replies and local interruptions. | Share gate/filter code after aligning the two channels. |
+| Acoustic echo | Cloud postprocessing compares MIC and SYS text after retranscription. No equivalent live cross-channel gate found in the Linux ingestion path. | Live SYS-to-MIC energy gate plus lexical checks, preserving quiet replies and local interruptions. | Share gate/filter code after aligning the two channels. |
 | Diarization | 128-dimensional hybrid acoustic/Whistle representation, EMA centroids, up to 32 speakers. | 16-dimensional acoustic/Whistle projection, short-backchannel handling, centroid/pitch checks, up to 16 speakers. | Compare on the same PCM fixtures before choosing an algorithm. Thresholds are not interchangeable. |
 | UI and lifecycle | GNOME/AppIndicator with D-Bus menus; stop joins workers outside the core mutex. | AppKit menu, serial action queue, dedicated snapshot mutex, immutable device cache, explicit STOPPING generation and condition variable. | Keep native UI; transfer lifecycle invariants and responsiveness tests. |
 | Metadata | Active microphone application. | Active input/output applications, Accessibility window title, EventKit meeting metadata. | Platform metadata stays optional. |
@@ -45,83 +45,103 @@ The macOS pipeline has additional protection and regression coverage for several
 failure modes. This is a source-level comparison, not evidence that one platform
 has better recognition accuracy or lower latency on real calls.
 
-## Integration implemented in this fork
+## Integration implemented after the import
 
-- `origin` points to the personal fork; `upstream` points to Voloire's repository.
-- Upstream Linux source files, headers, tools, scripts, assets, and `Makefile`
-  retain their paths and contents. README and ignore rules have small additions.
-- `GNUmakefile` dispatches by the host OS. `Makefile.macos` contains the previous
-  macOS build, with two adjusted source paths.
-- The two conflicting macOS filenames now live under `src/macos/`: `diarizer.c`
-  and `whistle_engine.c`. Their contents are preserved. Other macOS paths remain
-  unchanged, including `include/ascolto.h` and the live/capture pipeline.
-- Separate source lists keep the two incompatible C APIs out of the same binary.
-  Linux uses `include/ascolto/*.h`; macOS uses `include/ascolto.h`. Some exported
-  function names overlap with incompatible signatures, so linking both cores or
-  including both API families in one translation unit is currently unsupported.
-- Dependencies and generated audio, transcripts, diagnostic dumps, and binaries
-  are excluded from the macOS import.
+1. **Common audio contract and queue.** Both API families include
+   `include/ascolto/audio_types.h` and `capture_buffer.h`. The existing queue
+   algorithm is now portable C. Linux's PipeWire readers only enqueue; one
+   consumer feeds paired 20 ms intervals, SYS first, and pads a missing channel
+   after a bounded wait. Overflow is represented as silence on both timelines.
+   Stop joins producers and drains the consumer before closing artifacts. Linux
+   has an explicit STOPPING transition, rejects restart during drain, and makes
+   duplicate stops wait for the same session. Direct PCM ingestion also pads
+   timestamp gaps and ignores already-consumed overlap.
+2. **Shared VAD and filtering.** `src/audio_processing.c` contains the streaming
+   VAD, RMS calculation, timestamp-based SYS reference, lexical echo check, and
+   hallucination/repetition filter. Both platforms call these functions. Linux
+   adds the live energy gate and turn-level lexical check while retaining raw
+   audio for postprocessing. Its existing mock speech commands use their
+   explicit text hints with real encoder embeddings; synthetic formants are not
+   a transcription-accuracy test.
+3. **Shared recap worker and archive adaptation.** `scripts/recap.py` accepts
+   Linux call directories and macOS stereo archives. It validates stereo channel
+   identity, adapts audio through ffmpeg, accepts both JSONL timestamp schemas,
+   and writes cloud results separately. Local Markdown, JSONL, and source audio
+   survive both success and failure. A per-session lock prevents duplicate
+   processing. macOS atomically publishes its compressed archive before starting
+   opt-in automatic recap; shutdown waits for compression off the UI thread.
+   Native process launches use argument arrays rather than shell interpolation.
+4. **Compatible CLI on macOS.** The original `tools/ascoltoctl.c` builds on both
+   platforms. The macOS server exposes status and session/settings/recap commands;
+   state reads use the UI snapshot and mutations use the menu's existing serial
+   action queue. Socket permissions are 0600, regular files and active sockets
+   are preserved, slow mutations do not block other status clients, and shutdown
+   stops the server before destroying session state.
+5. **Measured diarization comparison.** `make compare-diarizers` runs both
+   unchanged algorithms with the host's Needle library on identical PCM. On the
+   five existing fixture turns (Alice, low male, Alice, low male, third voice),
+   macOS matched **5/5** expected labels and Linux matched **4/5**: Linux assigned
+   the third voice to SPEAKER_1. This is a small synthetic test, not a real-call
+   accuracy estimate. Both algorithms and their own thresholds are retained.
+   A common engine/diarizer API remains a future change that needs more labeled
+   speaker recordings; no representation or threshold was silently replaced.
 
-This establishes coexistence and upstream ancestry. It does not yet make the
-Linux and macOS runtime pipelines share a core or expose Linux-only features in
-the macOS menu.
+Native CoreAudio/AppKit and PipeWire/GNOME capture/UI remain separate. Shared
+modules require C, pthreads, and libm; they do not require GLib on macOS. The two
+engine/diarizer API families still have incompatible symbols and must not be
+linked into the same binary. The comparison builds one executable per algorithm.
 
-## Small, ordered follow-up changes
+## Verification and limits
 
-1. **Share queue and timing first.** Extract `src/capture_buffer.c`'s portable C
-   contract into a standalone header with a common channel type. Keep capture
-   callbacks limited to enqueueing, and add one Linux consumer for paired 20 ms
-   frames. Carry source timestamps into the queue and represent overflow as
-   silence on both channels. Adapt stop to drain the consumer before finalizing
-   artifacts. Reuse queue boundary and overflow regressions before adding the
-   bleed gate, which requires aligned channels.
-2. **Extract VAD and echo filtering as pure C modules.** Move frame gate state
-   and transcript filters out of the macOS live controller with small explicit
-   inputs: PCM/reference envelope, sample index, transcript, and prior SYS turns.
-   Keep the current algorithms and thresholds initially. Run the same acoustic
-   rooms against each platform adapter, including quiet replies and barge-in.
-3. **Adapt recap at the artifact boundary.** Convert copies of the macOS stereo
-   archive into `mic.flac`/`sys.flac`, map JSONL fields, and call the existing
-   Python worker. macOS segment times use `start_s`/`end_s`; the Linux recap
-   reader expects `start_sec`/`end_sec`. An adapter is required even though both
-   formats use `channel` and `speaker`. Keep original local transcripts and
-   JSONL, and write cloud results separately: upstream currently replaces
-   `transcript.md` and deletes `transcript.jsonl` after a successful recap.
-   Replace the compiled Linux `flac2wav` dependency with an optional `ffmpeg`
-   decoder, and adapt desktop notifications. Keep credentials and Claude CLI
-   dependencies outside the C capture process. No cloud call is needed to test
-   conversion, field mapping, argument construction, or artifact preservation.
-4. **Reuse CLI commands through a macOS adapter.** Keep `ascoltoctl`'s wire
-   commands and implement a local command dispatcher. Read `STATUS` from
-   `ascolto_live_app_read_snapshot()`; route mutations through the existing
-   session action queue. Do not execute ASR or wait for capture shutdown on the
-   AppKit thread. Add stop/drain concurrency tests before exposing commands.
-5. **Converge engine and diarization last.** First establish common PCM,
-   transcript-result, and ownership contracts. Compare both representations on
-   the same speaker fixtures and labeled real calls. Do not transplant numeric
-   similarity thresholds between the 16-D and 128-D representations.
+- macOS: the 21 harness checks and eight acoustic rooms, four concurrency/timeline
+  regressions, menu smoke test, and new CLI/socket/archive tests pass. The new
+  server test reads STATUS while a mutation is blocked on the processing mutex,
+  checks socket ownership behavior, and uses a fake interpreter to verify that
+  automatic recap starts only after archive publication. It opens no microphone.
+- Linux: all eight upstream suites, the common portable tests, and new
+  drain/concurrency/FLAC-duration regressions pass in Ubuntu 24.04 x86_64. The
+  controlled consumer blocks while a committed stop, duplicate stop, preference
+  changes, and rejected restart compete; both completed FLAC channels retain the
+  exact sample count including a partial final frame.
+- Portable tests cover startup offsets, missing channels, repeated overflow while
+  recovering a gap, blocked-consumer overflow, partial tails, quiet local replies,
+  interruptions, gate release, repetition filtering, and lexical echo checks.
+  AddressSanitizer and UndefinedBehaviorSanitizer also pass on this target.
+- Recap tests use synthetic stereo audio and mock providers. They verify channel
+  identity, both JSONL schemas, original-file retention, failure recovery, stereo
+  validation, and concurrent-job rejection. No real cloud API or credentials
+  are used by the tests. The transcription request contract was checked against
+  [official OpenAI documentation](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create).
+- The container has no live PipeWire server, GTK display, or installed ALSA speech
+  fixtures. Upstream tests fall back to default device entries and headless UI;
+  these results do not validate physical Linux capture or GNOME rendering.
+  Linux GTK actions retain their native upstream threading model.
+- The raw `pw-record` pipe has no hardware timestamps. Linux estimates each
+  stream's initial onset from its first delivered block and subsequently counts
+  PCM samples on a common monotonic epoch. This preserves helper startup offsets
+  but is not hardware-clock synchronization or sample-clock drift correction.
+- The optional real-microphone macOS suite was not run. No live cloud request or
+  real-call diarization accuracy evaluation was performed.
 
-Each step can be reviewed independently. Keep CoreAudio/AppKit and
-PipeWire/GNOME native; avoid adding a general plugin framework or requiring GLib
-in the macOS capture pipeline just to share algorithms.
+## Setup and repeatable checks
 
-## Import verification
+Use plain `make` so `GNUmakefile` selects the host. Linux sources stay at upstream
+paths; shared sources are explicitly added to its native Makefile. macOS sources
+with colliding names remain under `src/macos/`. Build outputs are host-specific.
 
-- macOS: `make test` passed all 21 harness checks, all four concurrency/timeline
-  regressions, and the menu UI smoke test. CoreAudio inspection required running
-  outside the restricted sandbox. The opt-in real-microphone suite was not run
-  because capture behavior was preserved rather than changed.
-- Linux: a source-only archive compiled successfully with `make -j2 all` in an
-  Ubuntu 24.04 x86_64 container, including the daemon, CLI, audio converter, and
-  test harness, with no compiler warnings. `ascolto --help` and
-  `ascoltoctl --help` exited successfully. The Linux test harness and live
-  GNOME/PipeWire behavior were not exercised in this container.
-- Preservation: all 19 original macOS source/header/script/test files checked
-  matched the pre-import backup byte-for-byte after accounting for the two
-  renamed sources. All 30 upstream files other than README and ignore rules
-  matched the reviewed upstream checkout byte-for-byte.
-- Both platform recipe selections, documentation links, and Git whitespace
-  checks passed. Upstream's reviewed commit is an ancestor of the import.
+```sh
+make test
+make test-portable
+make recap-deps
+make test-recap
+make compare-diarizers
+```
+
+`make recap-deps` creates the ignored `.venv` for NumPy/requests. Both launchers
+prefer it when available. `make compare-diarizers` needs the speech fixtures;
+macOS can generate them with `make fixtures`, while Linux can receive the same
+fixtures and override `FIXTURE_DIR` to their location. Recap setup and CLI details
+are in [README.macos.md](../README.macos.md).
 
 ## Updating from upstream
 

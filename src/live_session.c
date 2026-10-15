@@ -1,10 +1,12 @@
 #include "ascolto.h"
+#include "ascolto/json.h"
 
 #include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -40,114 +42,6 @@ static void ensure_dir_recursive(const char* dir_path) {
 /* --------------------------------------------------------------------------
  * Online Streaming VAD
  * -------------------------------------------------------------------------- */
-int ascolto_online_vad_init(ascolto_online_vad_t* v, ascolto_channel_t channel, const ascolto_vad_config_t* cfg) {
-    if (!v) return -1;
-    memset(v, 0, sizeof(*v));
-    v->channel = channel;
-    v->cfg = cfg ? *cfg : ascolto_vad_default_config();
-    v->capacity = ASCOLTO_SAMPLE_RATE * 30; /* 30 seconds buffer capacity */
-    v->buffer = (float*)calloc((size_t)v->capacity, sizeof(float));
-    if (!v->buffer) return -2;
-    return 0;
-}
-
-void ascolto_online_vad_reset(ascolto_online_vad_t* v) {
-    if (!v) return;
-    v->write_pos = 0;
-    v->in_speech = false;
-    v->speech_start_sample = 0;
-    v->last_voiced_sample = 0;
-    v->total_samples_processed = 0;
-}
-
-void ascolto_online_vad_free(ascolto_online_vad_t* v) {
-    if (!v) return;
-    free(v->buffer);
-    v->buffer = NULL;
-    v->capacity = 0;
-}
-
-void ascolto_online_vad_feed(
-    ascolto_online_vad_t* v,
-    const float* samples,
-    int num_samples,
-    ascolto_vad_turn_cb_t cb,
-    void* userdata
-) {
-    if (!v || !v->buffer || !samples || num_samples <= 0) return;
-
-    const int frame_len = ASCOLTO_SAMPLE_RATE / 50; /* 20 ms = 320 samples */
-    const int min_speech = (int)(v->cfg.min_speech_s * ASCOLTO_SAMPLE_RATE);
-    const int min_silence = (int)(v->cfg.min_silence_s * ASCOLTO_SAMPLE_RATE);
-    const int max_seg = (int)(v->cfg.max_segment_s * ASCOLTO_SAMPLE_RATE);
-
-    int idx = 0;
-    while (idx < num_samples) {
-        int step = (idx + frame_len <= num_samples) ? frame_len : (num_samples - idx);
-        float db = ascolto_audio_rms_db(samples + idx, step);
-        bool voiced = (db >= v->cfg.energy_threshold_db);
-
-        if (voiced || v->in_speech) {
-            if (!v->in_speech) {
-                v->in_speech = true;
-                v->write_pos = 0;
-                v->speech_start_sample = 0;
-                v->last_voiced_sample = 0;
-            }
-            int can_copy = (v->write_pos + step <= v->capacity) ? step : (v->capacity - v->write_pos);
-            if (can_copy > 0) {
-                memcpy(v->buffer + v->write_pos, samples + idx, (size_t)can_copy * sizeof(float));
-                v->write_pos += can_copy;
-            }
-            if (voiced) {
-                v->last_voiced_sample = v->write_pos;
-            }
-
-            int silence_tail = v->write_pos - v->last_voiced_sample;
-            bool hit_silence_end = (!voiced && silence_tail >= min_silence);
-            bool hit_max_len = (v->write_pos >= max_seg);
-
-            if (hit_silence_end || hit_max_len) {
-                int speech_len = v->last_voiced_sample;
-                if (speech_len >= min_speech && cb) {
-                    int out_len = v->write_pos;
-                    double end_s = (double)(v->total_samples_processed + step) / ASCOLTO_SAMPLE_RATE;
-                    double start_s = end_s - ((double)out_len / ASCOLTO_SAMPLE_RATE);
-                    if (start_s < 0.0) start_s = 0.0;
-                    float seg_rms = ascolto_audio_rms_db(v->buffer, out_len);
-                    cb(v->channel, v->buffer, out_len, start_s, end_s, seg_rms, userdata);
-                }
-                v->in_speech = false;
-                v->write_pos = 0;
-                v->last_voiced_sample = 0;
-            }
-        }
-
-        v->total_samples_processed += step;
-        idx += step;
-    }
-}
-
-void ascolto_online_vad_flush(
-    ascolto_online_vad_t* v,
-    ascolto_vad_turn_cb_t cb,
-    void* userdata
-) {
-    if (!v || !v->buffer) return;
-    const int min_speech = (int)(v->cfg.min_speech_s * ASCOLTO_SAMPLE_RATE);
-    if (v->in_speech && v->last_voiced_sample >= min_speech && cb) {
-        int out_len = v->write_pos;
-        double end_s = (double)v->total_samples_processed / ASCOLTO_SAMPLE_RATE;
-        double start_s = end_s - ((double)out_len / ASCOLTO_SAMPLE_RATE);
-        if (start_s < 0.0) start_s = 0.0;
-        float seg_rms = ascolto_audio_rms_db(v->buffer, out_len);
-        cb(v->channel, v->buffer, out_len, start_s, end_s, seg_rms, userdata);
-    }
-    v->in_speech = false;
-    v->write_pos = 0;
-    v->last_voiced_sample = 0;
-}
-
 /* --------------------------------------------------------------------------
  * Live Application Controller
  * -------------------------------------------------------------------------- */
@@ -189,161 +83,16 @@ void ascolto_live_app_read_snapshot(ascolto_live_app_t* app, ascolto_live_snapsh
     pthread_mutex_unlock(&app->snapshot_lock);
 }
 
-static int extract_normalized_words(const char* text, char words[][32], int max_words) {
-    if (!text || max_words <= 0) return 0;
-    int count = 0;
-    const char* p = text;
-    while (*p && count < max_words) {
-        while (*p && !isalnum((unsigned char)*p) && (unsigned char)*p < 128) p++;
-        if (!*p) break;
-        int len = 0;
-        char w[32];
-        while (*p && (isalnum((unsigned char)*p) || (unsigned char)*p >= 128)) {
-            if (len + 1 < (int)sizeof(w)) {
-                w[len++] = (char)tolower((unsigned char)*p);
-            }
-            p++;
-        }
-        w[len] = '\0';
-        if (len >= 2) {
-            snprintf(words[count++], 32, "%s", w);
-        }
-    }
-    return count;
-}
-
-bool ascolto_is_lexical_echo(const char* mic_text, const char* sys_text) {
-    if (!mic_text || !sys_text || !mic_text[0] || !sys_text[0]) return false;
-
-    char mw[64][32];
-    char sw[64][32];
-    int nm = extract_normalized_words(mic_text, mw, 64);
-    int ns = extract_normalized_words(sys_text, sw, 64);
-    if (nm == 0 || ns == 0) return false;
-
-    /* Join normalized words to check direct substring containment */
-    char m_join[512] = {0};
-    char s_join[512] = {0};
-    for (int i = 0; i < nm; i++) {
-        if (i > 0) strncat(m_join, " ", sizeof(m_join) - strlen(m_join) - 1);
-        strncat(m_join, mw[i], sizeof(m_join) - strlen(m_join) - 1);
-    }
-    for (int i = 0; i < ns; i++) {
-        if (i > 0) strncat(s_join, " ", sizeof(s_join) - strlen(s_join) - 1);
-        strncat(s_join, sw[i], sizeof(s_join) - strlen(s_join) - 1);
-    }
-    if (strlen(m_join) >= 3 && (strstr(s_join, m_join) != NULL || strstr(m_join, s_join) != NULL)) {
-        return true;
-    }
-
-    /* Check word-level and phonetic-stem (>=4 char) overlap */
-    int matched = 0;
-    for (int i = 0; i < nm; i++) {
-        size_t mlen = strlen(mw[i]);
-        bool hit = false;
-        for (int j = 0; j < ns; j++) {
-            size_t slen = strlen(sw[j]);
-            if (strcmp(mw[i], sw[j]) == 0) {
-                hit = true;
-                break;
-            }
-            if (mlen >= 4 && slen >= 4) {
-                if (strstr(sw[j], mw[i]) != NULL || strstr(mw[i], sw[j]) != NULL ||
-                    strncmp(mw[i], sw[j], 4) == 0) {
-                    hit = true;
-                    break;
-                }
-            }
-        }
-        if (hit) matched++;
-    }
-
-    if ((float)matched / (float)nm >= 0.60f) {
-        return true;
-    }
-    return false;
-}
-
-static bool has_repetition_loop(const char* text) {
-    char words[96][32];
-    int n = extract_normalized_words(text, words, 96);
-    if (n < 6) return false;
-
-    for (int i = 0; i < n; i++) {
-        int freq = 1;
-        for (int j = i + 1; j < n; j++) {
-            if (strcmp(words[i], words[j]) == 0) freq++;
-        }
-        if (freq >= 5 && (float)freq / (float)n >= 0.45f) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool ascolto_is_noise_hallucination(
-    const ascolto_transcript_result_t* tr,
-    ascolto_channel_t channel,
-    float rms_db,
-    bool recent_sys_activity
-) {
-    if (!tr || tr->text[0] == '\0') return true;
-
-    /* Reject decoder repetition loops ("Poco demo, poco demo, poco demo...") */
-    if (has_repetition_loop(tr->text)) {
-        return true;
-    }
-
-    /* Calculate average word probability from Whistle decoder attention */
-    float avg_prob = 1.0f;
+bool ascolto_is_noise_hallucination(const ascolto_transcript_result_t *tr,
+    ascolto_channel_t channel, float rms_db, bool recent_sys_activity) {
+    if (!tr) return true;
+    float probability = 1.0f;
     if (tr->num_words > 0) {
-        float prob_sum = 0.0f;
-        for (int i = 0; i < tr->num_words; i++) {
-            prob_sum += tr->words[i].probability;
-        }
-        avg_prob = prob_sum / (float)tr->num_words;
-        if (avg_prob < 0.50f) {
-            return true;
-        }
+        probability = 0;
+        for (int i = 0; i < tr->num_words; i++) probability += tr->words[i].probability;
+        probability /= tr->num_words;
     }
-
-    bool is_classic_phantom =
-        (strcmp(tr->text, "Grazie.") == 0 ||
-         strcmp(tr->text, "Grazie mille.") == 0 ||
-         strcmp(tr->text, "Grazie a tutti.") == 0 ||
-         strcmp(tr->text, "Grazie, grazie.") == 0 ||
-         strcmp(tr->text, "Grazie!") == 0 ||
-         strcmp(tr->text, "Buongiorno.") == 0 ||
-         strcmp(tr->text, "Buongiorno a tutti.") == 0 ||
-         strcmp(tr->text, "Buonasera.") == 0 ||
-         strcmp(tr->text, "Ciao a tutti, ciao a tutti.") == 0 ||
-         strstr(tr->text, "Sottotitoli") != NULL ||
-         strstr(tr->text, "Amara.org") != NULL);
-
-    bool is_short_filler =
-        (strcmp(tr->text, "Ok.") == 0 ||
-         strcmp(tr->text, "Eh...") == 0 ||
-         strcmp(tr->text, "Ehm...") == 0 ||
-         strcmp(tr->text, "Oh!") == 0 ||
-         strcmp(tr->text, "Allora.") == 0 ||
-         strcmp(tr->text, "Allora...") == 0 ||
-         strcmp(tr->text, "Io...") == 0 ||
-         strcmp(tr->text, "Non.") == 0);
-
-    if (channel == ASCOLTO_CHANNEL_MIC) {
-        if (is_classic_phantom && (rms_db < -22.0f || recent_sys_activity || avg_prob < 0.78f)) {
-            return true;
-        }
-        if (is_short_filler && (rms_db < -24.0f || recent_sys_activity || avg_prob < 0.72f)) {
-            return true;
-        }
-    } else {
-        /* On SYS, filter quiet background noise hallucinations so they don't spawn fake speakers */
-        if (is_classic_phantom && (rms_db < -26.0f || avg_prob < 0.68f)) {
-            return true;
-        }
-    }
-    return false;
+    return ascolto_transcript_is_noise(tr->text, tr->num_words, probability, channel, rms_db, recent_sys_activity);
 }
 
 static void on_live_vad_turn(
@@ -422,17 +171,14 @@ static void on_live_vad_turn(
            based on its average RMS, similar pitch, or a shared word such as "OK". */
         bool local_interruption = mic_sys_fr >= 3 && rms_db >= mic_sys_peak + 1.0f;
 
-        /* 2b. Check against recent SYS utterances for lexical echo or remote voiceprint match */
+        /* 2b. Check against recent SYS utterances for lexical echo */
         int n_rec = (app->recent_sys_utt_count < ASCOLTO_RECENT_SYS_UTTS)
             ? app->recent_sys_utt_count
             : ASCOLTO_RECENT_SYS_UTTS;
         for (int i = 0; i < n_rec; i++) {
             const ascolto_recent_sys_utt_t* su = &app->recent_sys_utts[i];
-            bool near_in_time = (start_s <= su->end_s + 3.5 && end_s >= su->start_s - 2.0);
-            if (!near_in_time) continue;
-
-            if (!local_interruption && sys_overlap_ratio >= 0.30f &&
-                ascolto_is_lexical_echo(tr.text, su->text) && rms_db < su->rms_db + 3.5f) {
+            if (ascolto_echo_turn_matches(tr.text, start_s, end_s, rms_db, sys_overlap_ratio,
+                local_interruption, su->text, su->start_s, su->end_s, su->rms_db)) {
                 app->mic_echo_turns_suppressed++;
                 return;
             }
@@ -502,7 +248,7 @@ static void on_live_vad_turn(
         fprintf(app->jsonl_file,
                 "{\"event\":\"utterance\",\"channel\":\"%s\",\"source_app\":\"%s\",\"speaker\":\"%s\","
                 "\"is_new_speaker\":%s,\"similarity\":%.3f,\"start_s\":%.2f,\"end_s\":%.2f,"
-                "\"f0_hz\":%.1f,\"rms_db\":%.1f,\"language\":\"%s\",\"ttft_ms\":%.1f,\"text\":\"",
+                "\"f0_hz\":%.1f,\"rms_db\":%.1f,\"language\":\"%s\",\"ttft_ms\":%.1f,\"text\":",
                 ascolto_channel_name(channel),
                 src_app,
                 speaker,
@@ -514,11 +260,8 @@ static void on_live_vad_turn(
                 rms_db,
                 tr.language,
                 tr.ttft_ms);
-        for (const char* p = tr.text; *p; p++) {
-            if (*p == '"' || *p == '\\') fputc('\\', app->jsonl_file);
-            fputc(*p, app->jsonl_file);
-        }
-        fprintf(app->jsonl_file, "\"}\n");
+        ascolto_write_json_string(app->jsonl_file, tr.text);
+        fprintf(app->jsonl_file, "}\n");
         fflush(app->jsonl_file);
     }
 }
@@ -607,6 +350,10 @@ static int start_session_unlocked(ascolto_live_app_t* app, bool is_manual) {
     localtime_r(&now, &tm_now);
     char stamp[64];
     strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tm_now);
+    struct timeval wall_time;
+    gettimeofday(&wall_time, NULL);
+    size_t stamp_length = strlen(stamp);
+    snprintf(stamp + stamp_length, sizeof(stamp) - stamp_length, "-%06u", (unsigned)wall_time.tv_usec);
 
     snprintf(app->current_md_path, sizeof(app->current_md_path),
              "%s/%s_call.md", app->config.output_dir, stamp);
@@ -621,7 +368,8 @@ static int start_session_unlocked(ascolto_live_app_t* app, bool is_manual) {
 
     app->md_file = fopen(app->current_md_path, "w");
     app->jsonl_file = fopen(app->current_jsonl_path, "w");
-    if (app->config.save_audio) {
+    app->session_save_audio = app->config.save_audio || app->config.cloud_recap;
+    if (app->session_save_audio) {
         app->mic_raw_file = fopen(app->current_mic_raw_path, "wb");
         app->sys_raw_file = fopen(app->current_sys_raw_path, "wb");
     }
@@ -732,7 +480,7 @@ static int stop_session_unlocked(ascolto_live_app_t* app) {
         fprintf(app->jsonl_file,
                 "{\"event\":\"session_end\",\"duration_s\":%.2f,\"utterances\":%d,\"remote_speakers\":%d,\"audio_m4a\":\"%s\",\"bleed_frames\":%d,\"echo_turns\":%d,\"capture_dropped_samples\":%lld,\"padded_mic_samples\":%lld,\"padded_sys_samples\":%lld}\n",
                 elapsed, app->session_utterance_count, app->diarizer.num_speakers,
-                app->config.save_audio ? app->current_m4a_path : "",
+                app->session_save_audio ? app->current_m4a_path : "",
                 app->mic_bleed_frames_suppressed, app->mic_echo_turns_suppressed,
                 (long long)app->capture_dropped_samples,
                 (long long)app->capture_padded_samples[0], (long long)app->capture_padded_samples[1]);
@@ -760,25 +508,9 @@ static int stop_session_unlocked(ascolto_live_app_t* app) {
         return 0;
     }
 
-    /* Compress dual raw streams (Ch1=MIC, Ch2=SYS) into tiny stereo 48kbps AAC .m4a (~21 MB/hour).
-       Explicitly include /opt/homebrew/bin and /usr/local/bin in PATH because macOS GUI .app bundles
-       launched via LaunchServices only have /usr/bin:/bin in PATH. */
-    if (app->config.save_audio && app->current_mic_raw_path[0] && app->current_sys_raw_path[0]) {
-        char cmd[2048];
-        snprintf(cmd, sizeof(cmd),
-                 "(export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; "
-                 "ffmpeg -y -loglevel error "
-                 "-f f32le -ar 16000 -ac 1 -i \"%s\" "
-                 "-f f32le -ar 16000 -ac 1 -i \"%s\" "
-                 "-filter_complex \"[0:a][1:a]amerge=inputs=2[aout]\" "
-                 "-map \"[aout]\" -c:a aac -b:a 48k \"%s\" && "
-                 "rm -f \"%s\" \"%s\") >/dev/null 2>&1 &",
-                 app->current_mic_raw_path,
-                 app->current_sys_raw_path,
-                 app->current_m4a_path,
-                 app->current_mic_raw_path,
-                 app->current_sys_raw_path);
-        system(cmd);
+    if (app->session_save_audio && app->current_mic_raw_path[0] && app->current_sys_raw_path[0]) {
+        ascolto_archive_finalize(&app->config, app->current_mic_raw_path, app->current_sys_raw_path,
+                                app->current_m4a_path, app->current_md_path);
     }
 
     app->manual_override_active = false;
@@ -931,6 +663,24 @@ void ascolto_live_app_set_save_audio(ascolto_live_app_t* app, bool enabled) {
     pthread_mutex_unlock(&app->lock);
 }
 
+void ascolto_live_app_set_cloud_recap(ascolto_live_app_t* app, bool enabled) {
+    if (!app) return;
+    pthread_mutex_lock(&app->lock);
+    app->config.cloud_recap = enabled;
+    ascolto_config_save(&app->config, NULL);
+    publish_snapshot_unlocked(app);
+    pthread_mutex_unlock(&app->lock);
+}
+
+void ascolto_live_app_set_recap_tts(ascolto_live_app_t* app, bool enabled) {
+    if (!app) return;
+    pthread_mutex_lock(&app->lock);
+    app->config.recap_tts = enabled;
+    ascolto_config_save(&app->config, NULL);
+    publish_snapshot_unlocked(app);
+    pthread_mutex_unlock(&app->lock);
+}
+
 static void process_audio_unlocked(
     ascolto_live_app_t* app,
     ascolto_channel_t channel,
@@ -977,28 +727,11 @@ static void process_audio_unlocked(
                 int step = (idx + frame_len <= num_samples) ? frame_len : (num_samples - idx);
                 float f_db = ascolto_audio_rms_db(samples + idx, step);
 
-                double mic_t = (double)(app->vad_mic.total_samples_processed + step) /
-                               (double)ASCOLTO_SAMPLE_RATE;
-                double sys_t = (double)app->vad_sys.total_samples_processed /
-                               (double)ASCOLTO_SAMPLE_RATE;
-
                 /* Address SYS history by stream sample position, independent of callback sizes.
                    Only suppress MIC within 240ms of SYS speech and below SYS + 3.5 dB. */
-                int64_t frame_end = (app->vad_mic.total_samples_processed + step + frame_len - 1) / frame_len;
-                if (frame_end > app->sys_env_frames) frame_end = app->sys_env_frames;
-                float ref_sys_db = -100.0f;
-                bool sys_active_window = false;
-                for (int k = 0; k < 12 && frame_end - k > 0; k++) {
-                    int64_t frame = frame_end - 1 - k;
-                    if (app->sys_env_frames - frame > ASCOLTO_SYS_ENV_HISTORY) break;
-                    float sdb = app->sys_env_db[frame % ASCOLTO_SYS_ENV_HISTORY];
-                    if (sdb >= -36.5f) {
-                        sys_active_window = true;
-                        if (sdb > ref_sys_db) ref_sys_db = sdb;
-                    }
-                }
-                /* A missing reference must never gate local-only audio. */
-                if (fabs(mic_t - sys_t) > 0.25) sys_active_window = false;
+                float ref_sys_db;
+                bool sys_active_window = ascolto_bleed_reference(app->sys_env_db, app->sys_env_frames,
+                    app->vad_mic.total_samples_processed + step, app->vad_sys.total_samples_processed, &ref_sys_db);
                 bool is_bleed = sys_active_window && f_db < ref_sys_db + 3.5f;
                 app->mic_barge_in_streak = (!is_bleed && sys_active_window) ? app->mic_barge_in_streak + 1 : 0;
 

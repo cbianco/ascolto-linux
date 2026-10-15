@@ -12,6 +12,9 @@ CORE_SRCS := \
 	src/observability.c \
 	src/whistle_engine.c \
 	src/diarizer.c \
+	src/capture_buffer.c \
+	src/audio_processing.c \
+	src/audio_queue.c \
 	src/audio_backend.c \
 	src/audio_recorder.c \
 	src/tray_ui.c \
@@ -48,8 +51,13 @@ bin/test_harness: $(CORE_OBJS) tests/test_harness.c
 	@mkdir -p bin
 	$(CC) $(CFLAGS) $(CORE_OBJS) tests/test_harness.c -o $@ $(LDFLAGS)
 
-test: all
+bin/linux_regression: $(CORE_OBJS) tests/linux_regression.c
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $(CORE_OBJS) tests/linux_regression.c -o $@ $(LDFLAGS)
+
+test: all bin/linux_regression test-portable
 	./bin/test_harness
+	./bin/linux_regression
 
 install-desktop: all
 	chmod +x scripts/launch_ascolto.sh

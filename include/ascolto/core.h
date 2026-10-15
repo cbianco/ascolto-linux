@@ -2,6 +2,7 @@
 #define ASCOLTO_CORE_H
 
 #include "ascolto/types.h"
+#include "ascolto/audio_processing.h"
 #include "ascolto/diarizer.h"
 #include "ascolto/whistle_engine.h"
 #include "ascolto/audio_backend.h"
@@ -16,14 +17,10 @@ extern "C" {
 #endif
 
 typedef struct {
-    float *samples;
-    size_t count;
-    size_t capacity;
-    double start_time_sec;
-    double last_voice_sec;
-    bool in_speech;
-    char hint_text[512];
-} ascolto_channel_vad_t;
+    double start, end;
+    float rms_db;
+    char text[512];
+} ascolto_echo_turn_t;
 
 struct ascolto_core {
     ascolto_config_t config;
@@ -55,7 +52,15 @@ struct ascolto_core {
     ascolto_segment_t segments[ASCOLTO_MAX_SEGMENTS_MEM];
     size_t segments_count;
 
-    ascolto_channel_vad_t vad[2];
+    ascolto_online_vad_t vad[2];
+    char vad_hint[2][512];
+    float sys_env_db[ASCOLTO_SYS_ENV_HISTORY];
+    int64_t sys_env_frames;
+    int64_t last_sys_voiced_sample;
+    int mic_turn_frames, mic_sys_frames;
+    float mic_sys_peak;
+    ascolto_echo_turn_t recent_sys[8];
+    unsigned recent_sys_count;
 
     ascolto_whistle_engine_t whistle;
     ascolto_diarizer_t diarizer;
@@ -63,7 +68,11 @@ struct ascolto_core {
     ascolto_tray_ui_t tray;
     ascolto_obs_t obs;
 
+    pthread_mutex_t processing_mutex;
     pthread_mutex_t mutex;
+    pthread_cond_t session_condition;
+    bool session_starting;
+    bool drain_recording;
 };
 
 int ascolto_core_init(ascolto_core_t *core, const ascolto_config_t *cfg, bool use_mock_audio);

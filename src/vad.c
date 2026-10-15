@@ -3,16 +3,6 @@
 #include <math.h>
 #include <stddef.h>
 
-ascolto_vad_config_t ascolto_vad_default_config(void) {
-    ascolto_vad_config_t cfg;
-    cfg.energy_threshold_db = -42.0f;
-    cfg.min_speech_s = 0.25;
-    cfg.min_silence_s = 0.35;
-    cfg.max_segment_s = 25.0;
-    cfg.pad_s = 0.12;
-    return cfg;
-}
-
 int ascolto_vad_segment_buffer(
     const float* samples,
     int num_samples,

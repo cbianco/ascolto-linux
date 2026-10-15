@@ -42,9 +42,12 @@ static void resolve_model_path(const char* configured, char* out_path, size_t ca
 int main(int argc, char** argv) {
     const char* config_path = NULL;
     const char* model_override = NULL;
+    const char* socket_override = NULL;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "--socket") == 0 && i + 1 < argc) {
+            socket_override = argv[++i];
+        } else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
             config_path = argv[++i];
         } else if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             model_override = argv[++i];
@@ -53,7 +56,7 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--capture-smoke-test") == 0) {
             setenv("ASCOLTO_CAPTURE_SMOKE_TEST", "1", 1);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            printf("Usage: %s [--config <path>] [--model <whistle.cact>] [--smoke-test] [--capture-smoke-test]\n", argv[0]);
+            printf("Usage: %s [--config <path>] [--model <whistle.cact>] [--socket <path>] [--smoke-test] [--capture-smoke-test]\n", argv[0]);
             return 0;
         }
     }
@@ -79,8 +82,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (socket_override) snprintf(app.config.control_socket, sizeof(app.config.control_socket), "%s", socket_override);
     const char* smoke_env = getenv("ASCOLTO_MENUBAR_SMOKE_MS");
     if ((smoke_env && atoi(smoke_env) > 0) || getenv("ASCOLTO_CAPTURE_SMOKE_TEST")) {
+        snprintf(app.config.control_socket, sizeof(app.config.control_socket), "/tmp/ascolto-smoke-%u.sock", (unsigned)getpid());
         app.config.auto_trigger_mic = false;
         app.config.save_audio = false;
         if (!config_path || smoke_env) {

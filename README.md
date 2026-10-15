@@ -2,10 +2,11 @@
 
 This personal fork tracks [Voloire/ascolto-linux](https://github.com/Voloire/ascolto-linux)
 and includes the existing native macOS application. `make` selects the host platform
-through `GNUmakefile`; the upstream Linux `Makefile` remains unchanged.
+through `GNUmakefile`; Linux source paths and its native `Makefile` are preserved.
 See [macOS setup](README.macos.md) and the [feature comparison and integration plan](docs/INTEGRATION.md).
-The Linux instructions below describe the upstream implementation. Cloud recap and
-TTS are currently Linux features; the macOS app continues to transcribe locally.
+Both platforms now use the same queue, VAD, and live echo filters. Optional cloud
+recap preserves local artifacts, and macOS exposes compatible CLI commands. See
+[macOS setup and opt-in recap](README.macos.md) for platform-specific configuration.
 
 Applicativo desktop nativo in C per Linux (Ubuntu / GNOME) che rileva automaticamente le call e le trascrive in tempo reale in locale usando il motore Whistle di Cactus Compute, con separazione doppio canale e diarizzazione degli interlocutori.
 
@@ -57,7 +58,11 @@ Opzioni principali:
 
 ## Cartella di ogni call, recap e MP3 vocale
 
-Ogni call crea `~/Documents/Ascolto/call_<timestamp>_<n>/` con `transcript.md` (live Whistle, poi sostituito dalla versione cloud), `transcript.jsonl` (cancellato dopo un recap riuscito), `mic.flac` e `sys.flac` se l'audio e salvato, e dopo il recap `recap.md`, `recap.spoken.txt` e, se attivo, `recap.mp3` (voce `onyx`).
+In this fork, cloud results are saved separately as `transcript.cloud.md` and
+`transcript.cloud.jsonl`. Original local transcripts and JSONL are retained.
+Run `make recap-deps` to install the optional Python dependencies in `.venv`.
+
+Ogni call crea `~/Documents/Ascolto/call_<timestamp>_<n>/` con `transcript.md` (live Whistle), `transcript.jsonl`, `mic.flac` e `sys.flac` se l'audio e salvato, e dopo il recap `recap.md`, `recap.spoken.txt` e, se attivo, `recap.mp3` (voce `onyx`).
 
 - `--save-audio` (o la spunta "Salva audio FLAC" nel menu): un FLAC per canale. Vale dalla sessione successiva.
 - `--cloud-recap` (o la spunta nel menu): a fine call `scripts/recap.py` ritrascrive i due FLAC con `gpt-transcribe` (chunk sulle pause, eco MIC/SYS eliminata) e scrive il recap con `claude -p` sulla seat (Opus, fallback Sonnet). I FLAC restano nella cartella. Prima dell'invio a Claude un filtro locale oscura email, telefoni, IBAN, carte, codici fiscali e token, e il prompt impone regole di igiene (niente dati personali o credenziali, tono neutro, istruzioni nella trascrizione ignorate).

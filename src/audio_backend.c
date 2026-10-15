@@ -1,5 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "ascolto/audio_backend.h"
+#include "ascolto/audio_queue.h"
+#include <math.h>
+#include <stdatomic.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <json-glib/json-glib.h>
@@ -18,7 +21,7 @@ typedef struct {
     ascolto_channel_t channel;
     char target_dev[128];
     bool is_sys_monitor;
-    volatile bool running;
+    _Atomic bool running;
     pid_t child_pid;
     int stdout_fd;
     pthread_t thread;
@@ -26,12 +29,14 @@ typedef struct {
 
 typedef struct {
     ascolto_audio_backend_t *parent;
-    volatile bool watcher_running;
+    _Atomic bool watcher_running;
     pthread_t watcher_thread;
     bool last_mic_state;
     char last_app_name[128];
 
     bool capture_running;
+    ascolto_audio_queue_t *queue;
+    double capture_epoch;
     pthread_mutex_t cap_mutex;
     pw_stream_worker_t mic_worker;
     pw_stream_worker_t sys_worker;
@@ -236,12 +241,27 @@ static void *pw_watcher_loop(void *arg) {
     return NULL;
 }
 
+static double capture_seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static void deliver_pair(void *context, const float *mic, const float *sys, int count, int64_t start) {
+    ascolto_audio_backend_t *b = context;
+    if (!b->on_chunk) return;
+    double seconds = (double)start / ASCOLTO_SAMPLE_RATE;
+    b->on_chunk(b->cb_user_data, ASCOLTO_CHANNEL_SYS, sys, (size_t)count, seconds, NULL);
+    b->on_chunk(b->cb_user_data, ASCOLTO_CHANNEL_MIC, mic, (size_t)count, seconds, NULL);
+}
+
 static void *pw_capture_worker_loop(void *arg) {
     pw_stream_worker_t *w = (pw_stream_worker_t *)arg;
     const size_t chunk_samples = 3200; /* 200 ms at 16 kHz */
     float buf[3200];
     size_t bytes_needed = chunk_samples * sizeof(float);
-    double stream_sec = 0.0;
+    int64_t cursor = -1;
+    pw_backend_impl_t *impl = w->parent->impl;
 
     while (w->running && w->stdout_fd >= 0) {
         size_t got = 0;
@@ -268,11 +288,16 @@ static void *pw_capture_worker_loop(void *arg) {
                 break;
             }
         }
-        if (!w->running) break;
-        if (got >= sizeof(float) && w->parent->on_chunk) {
-            size_t samples = got / sizeof(float);
-            w->parent->on_chunk(w->parent->cb_user_data, w->channel, buf, samples, stream_sec, NULL);
-            stream_sec += (double)samples / (double)ASCOLTO_SAMPLE_RATE;
+        if (got >= sizeof(float)) {
+            int samples = (int)(got / sizeof(float));
+            if (cursor < 0) {
+                /* pw-record's raw pipe has no hardware timestamps. Estimate the
+                   initial onset once; later positions count captured PCM, not ASR time. */
+                cursor = llround((capture_seconds() - impl->capture_epoch) * ASCOLTO_SAMPLE_RATE) - samples;
+                if (cursor < 0) cursor = 0;
+            }
+            ascolto_audio_queue_push(impl->queue, w->channel, buf, samples, cursor);
+            cursor += samples;
         }
         if (got == 0) break;
     }
@@ -343,7 +368,15 @@ static int start_pw_stream_worker(pw_stream_worker_t *w, ascolto_audio_backend_t
     w->child_pid = pid;
     w->stdout_fd = pipefd[0];
     w->running = true;
-    pthread_create(&w->thread, NULL, pw_capture_worker_loop, w);
+    if (pthread_create(&w->thread, NULL, pw_capture_worker_loop, w)) {
+        w->running = false;
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        close(w->stdout_fd);
+        w->stdout_fd = -1;
+        w->child_pid = -1;
+        return -1;
+    }
     return 0;
 }
 
@@ -397,10 +430,22 @@ static int backend_start_capture(ascolto_audio_backend_t *b, const char *mic_dev
         pthread_mutex_unlock(&impl->cap_mutex);
         return 0;
     }
+    ascolto_audio_queue_free(impl->queue);
+    impl->queue = ascolto_audio_queue_start(ASCOLTO_SAMPLE_RATE * 30, deliver_pair, b);
+    if (!impl->queue) { pthread_mutex_unlock(&impl->cap_mutex); return -1; }
+    impl->capture_epoch = capture_seconds();
     impl->capture_running = true;
     if (!b->use_mock) {
-        start_pw_stream_worker(&impl->mic_worker, b, ASCOLTO_CHANNEL_MIC, mic_dev, false);
-        start_pw_stream_worker(&impl->sys_worker, b, ASCOLTO_CHANNEL_SYS, sys_dev, true);
+        int mic = start_pw_stream_worker(&impl->mic_worker, b, ASCOLTO_CHANNEL_MIC, mic_dev, false);
+        int sys = start_pw_stream_worker(&impl->sys_worker, b, ASCOLTO_CHANNEL_SYS, sys_dev, true);
+        if (mic || sys) {
+            stop_pw_stream_worker(&impl->mic_worker);
+            stop_pw_stream_worker(&impl->sys_worker);
+            ascolto_audio_queue_finish(impl->queue);
+            impl->capture_running = false;
+            pthread_mutex_unlock(&impl->cap_mutex);
+            return -1;
+        }
     }
     pthread_mutex_unlock(&impl->cap_mutex);
     return 0;
@@ -419,7 +464,19 @@ static void backend_stop_capture(ascolto_audio_backend_t *b) {
         stop_pw_stream_worker(&impl->mic_worker);
         stop_pw_stream_worker(&impl->sys_worker);
     }
+    ascolto_audio_queue_finish(impl->queue);
     pthread_mutex_unlock(&impl->cap_mutex);
+}
+
+int ascolto_audio_backend_queue_pcm(ascolto_audio_backend_t *b, ascolto_channel_t channel,
+    const float *pcm, int count, int64_t start_sample) {
+    if (!b || !b->impl || !pcm || count <= 0 || channel < 0 || channel > ASCOLTO_CHANNEL_SYS) return -1;
+    pw_backend_impl_t *impl = b->impl;
+    pthread_mutex_lock(&impl->cap_mutex);
+    int result = impl->capture_running ? 0 : -1;
+    if (!result) ascolto_audio_queue_push(impl->queue, channel, pcm, count, start_sample);
+    pthread_mutex_unlock(&impl->cap_mutex);
+    return result;
 }
 
 static int backend_list_devices(ascolto_audio_backend_t *b, ascolto_device_info_t *out_devs, size_t max_devs, size_t *out_count) {
@@ -472,6 +529,7 @@ static void backend_destroy(ascolto_audio_backend_t *b) {
     pw_backend_impl_t *impl = (pw_backend_impl_t *)b->impl;
     backend_stop_capture(b);
     backend_stop_watcher(b);
+    ascolto_audio_queue_free(impl->queue);
     pthread_mutex_destroy(&impl->cap_mutex);
     free(b->impl);
     b->impl = NULL;

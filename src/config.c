@@ -1,10 +1,12 @@
 #include "ascolto.h"
+#include "ascolto/json.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 static void ensure_parent_dir(const char* file_path) {
     if (!file_path) return;
@@ -22,9 +24,14 @@ static void ensure_parent_dir(const char* file_path) {
 void ascolto_config_init_defaults(ascolto_config_t* cfg) {
     if (!cfg) return;
     memset(cfg, 0, sizeof(*cfg));
+    const char* runtime_dir = getenv("TMPDIR");
+    if (runtime_dir && runtime_dir[0])
+        snprintf(cfg->control_socket, sizeof(cfg->control_socket), "%s/ascolto.sock", runtime_dir);
+    else snprintf(cfg->control_socket, sizeof(cfg->control_socket), "/tmp/ascolto-%u.sock", (unsigned)getuid());
     cfg->auto_trigger_mic = true;
     cfg->paused = false;
     cfg->save_audio = true;
+    snprintf(cfg->recap_python, sizeof(cfg->recap_python), "python3");
     snprintf(cfg->language, sizeof(cfg->language), "auto");
     cfg->mic_device_id = 0;
     cfg->sys_device_id = 0;
@@ -101,6 +108,10 @@ int ascolto_config_load(ascolto_config_t* cfg, const char* path_override) {
 
     cfg->auto_trigger_mic = json_parse_bool_field(buf, "auto_trigger_mic", cfg->auto_trigger_mic);
     cfg->paused = json_parse_bool_field(buf, "paused", cfg->paused);
+    cfg->cloud_recap = json_parse_bool_field(buf, "cloud_recap", cfg->cloud_recap);
+    cfg->recap_tts = json_parse_bool_field(buf, "recap_tts", cfg->recap_tts);
+    json_parse_str_field(buf, "control_socket", cfg->control_socket, sizeof(cfg->control_socket));
+    json_parse_str_field(buf, "recap_python", cfg->recap_python, sizeof(cfg->recap_python));
     cfg->save_audio = json_parse_bool_field(buf, "save_audio", cfg->save_audio);
     json_parse_str_field(buf, "language", cfg->language, sizeof(cfg->language));
     cfg->mic_device_id = (uint32_t)json_parse_num_field(buf, "mic_device_id", cfg->mic_device_id);
@@ -111,6 +122,12 @@ int ascolto_config_load(ascolto_config_t* cfg, const char* path_override) {
     json_parse_str_field(buf, "model_path", cfg->model_path, sizeof(cfg->model_path));
 
     return 0;
+}
+
+static void json_write_string(FILE* file, const char* key, const char* value, bool last) {
+    fprintf(file, "  \"%s\": ", key);
+    ascolto_write_json_string(file, value);
+    fprintf(file, "%s\n", last ? "" : ",");
 }
 
 int ascolto_config_save(const ascolto_config_t* cfg, const char* path_override) {
@@ -131,16 +148,21 @@ int ascolto_config_save(const ascolto_config_t* cfg, const char* path_override) 
     if (!f) return -2;
 
     fprintf(f, "{\n");
+    fprintf(f, "  \"cloud_recap\": %s,\n", cfg->cloud_recap ? "true" : "false");
+    fprintf(f, "  \"recap_tts\": %s,\n", cfg->recap_tts ? "true" : "false");
+    json_write_string(f, "control_socket", cfg->control_socket, false);
+    json_write_string(f, "recap_python", cfg->recap_python, false);
+
     fprintf(f, "  \"auto_trigger_mic\": %s,\n", cfg->auto_trigger_mic ? "true" : "false");
     fprintf(f, "  \"paused\": %s,\n", cfg->paused ? "true" : "false");
     fprintf(f, "  \"save_audio\": %s,\n", cfg->save_audio ? "true" : "false");
-    fprintf(f, "  \"language\": \"%s\",\n", cfg->language);
+    json_write_string(f, "language", cfg->language, false);
     fprintf(f, "  \"mic_device_id\": %u,\n", cfg->mic_device_id);
     fprintf(f, "  \"sys_device_id\": %u,\n", cfg->sys_device_id);
     fprintf(f, "  \"diarizer_threshold\": %.2f,\n", cfg->diarizer_threshold);
-    fprintf(f, "  \"output_dir\": \"%s\",\n", cfg->output_dir);
-    fprintf(f, "  \"keywords_path\": \"%s\",\n", cfg->keywords_path);
-    fprintf(f, "  \"model_path\": \"%s\"\n", cfg->model_path);
+    json_write_string(f, "output_dir", cfg->output_dir, false);
+    json_write_string(f, "keywords_path", cfg->keywords_path, false);
+    json_write_string(f, "model_path", cfg->model_path, true);
     fprintf(f, "}\n");
 
     fclose(f);

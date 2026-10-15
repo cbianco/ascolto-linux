@@ -2,6 +2,7 @@
 #import <Cocoa/Cocoa.h>
 #import <CoreGraphics/CoreGraphics.h>
 #include "ascolto.h"
+#include "ascolto/macos_control.h"
 
 @interface AscoltoMenuController : NSObject <NSApplicationDelegate, NSMenuDelegate>
 @property (nonatomic, assign) ascolto_live_app_t* app;
@@ -10,6 +11,7 @@
 @property (nonatomic, strong) NSMenu* statusMenu;
 @property (nonatomic, strong) NSTimer* refreshTimer;
 @property (nonatomic, strong) dispatch_queue_t sessionQueue;
+@property (nonatomic, assign) ascolto_control_t* control;
 @property (nonatomic, strong) dispatch_queue_t deviceQueue;
 @property (nonatomic, strong) NSData* deviceInventory;
 @property (nonatomic, assign) BOOL deviceRefreshPending;
@@ -54,6 +56,7 @@
                                                         repeats:YES];
         [[NSRunLoop mainRunLoop] addTimer:_refreshTimer forMode:NSRunLoopCommonModes];
     }
+    if (self) _control = ascolto_control_start(_app, _sessionQueue);
     return self;
 }
 
@@ -262,6 +265,22 @@
     saveAudioItem.target = self;
     saveAudioItem.state = save_audio ? NSControlStateValueOn : NSControlStateValueOff;
     [_statusMenu addItem:saveAudioItem];
+    NSMenuItem* recapItem = [[NSMenuItem alloc] initWithTitle:@"Cloud recap (OpenAI + Claude)"
+        action:@selector(onToggleCloudRecap:) keyEquivalent:@""];
+    recapItem.target = self;
+    recapItem.state = snapshot.config.cloud_recap ? NSControlStateValueOn : NSControlStateValueOff;
+    [_statusMenu addItem:recapItem];
+    NSMenuItem* ttsItem = [[NSMenuItem alloc] initWithTitle:@"Generate recap voice (OpenAI TTS)"
+        action:@selector(onToggleRecapTTS:) keyEquivalent:@""];
+    ttsItem.target = self;
+    ttsItem.state = snapshot.config.recap_tts ? NSControlStateValueOn : NSControlStateValueOff;
+    [_statusMenu addItem:ttsItem];
+    NSMenuItem* runRecap = [[NSMenuItem alloc] initWithTitle:@"Generate recap for the last session"
+        action:@selector(onRunRecap:) keyEquivalent:@""];
+    runRecap.target = self;
+    runRecap.enabled = snapshot.current_md_path[0] && st != ASCOLTO_STATE_RECORDING && st != ASCOLTO_STATE_STOPPING;
+    [_statusMenu addItem:runRecap];
+
 
     [_statusMenu addItem:[NSMenuItem separatorItem]];
 
@@ -460,6 +479,40 @@
     }];
 }
 
+- (void)onToggleCloudRecap:(id)sender {
+    (void)sender;
+    [self performSessionAction:^(ascolto_live_app_t* app) {
+        ascolto_live_snapshot_t snapshot;
+        ascolto_live_app_read_snapshot(app, &snapshot);
+        ascolto_live_app_set_cloud_recap(app, !snapshot.config.cloud_recap);
+    }];
+}
+
+- (void)onToggleRecapTTS:(id)sender {
+    (void)sender;
+    [self performSessionAction:^(ascolto_live_app_t* app) {
+        ascolto_live_snapshot_t snapshot;
+        ascolto_live_app_read_snapshot(app, &snapshot);
+        ascolto_live_app_set_recap_tts(app, !snapshot.config.recap_tts);
+    }];
+}
+
+- (void)onRunRecap:(id)sender {
+    (void)sender;
+    [self performSessionAction:^(ascolto_live_app_t* app) {
+        ascolto_live_snapshot_t snapshot;
+        ascolto_live_app_read_snapshot(app, &snapshot);
+        if (ascolto_recap_start(&snapshot.config, snapshot.current_md_path, false, false)) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSAlert* alert = [NSAlert new];
+                alert.messageText = @"Recap could not start";
+                alert.informativeText = @"Wait for audio finalization and check the Python setup in README.macos.md.";
+                [alert runModal];
+            });
+        }
+    }];
+}
+
 - (void)onSelectLanguage:(NSMenuItem*)sender {
     NSString* code = sender.representedObject;
     if (code) [self performSessionAction:^(ascolto_live_app_t* app) {
@@ -550,12 +603,16 @@
     if (_terminationPending) return NSTerminateLater;
     _terminationPending = YES;
     [_refreshTimer invalidate];
-    dispatch_async(_sessionQueue, ^{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+      ascolto_control_stop(self.control);
+      self.control = NULL;
+      dispatch_async(self.sessionQueue, ^{
         if (self.capture && *self.capture) {
             ascolto_macos_capture_stop(*self.capture);
             *self.capture = NULL;
         }
         ascolto_live_app_stop_session(self.app);
+        ascolto_archive_wait();
         /* NSTerminateLater may run a nested modal loop inside a main dispatch
            callback. Schedule its reply on the run loop so that callback can finish. */
         CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
@@ -566,6 +623,7 @@
             [sender replyToApplicationShouldTerminate:YES];
         });
         CFRunLoopWakeUp(CFRunLoopGetMain());
+    });
     });
     return NSTerminateLater;
 }

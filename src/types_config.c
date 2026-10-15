@@ -10,6 +10,7 @@
 
 const char *ascolto_state_to_string(ascolto_state_t state) {
     switch (state) {
+        case ASCOLTO_STATE_STOPPING:         return "STOPPING";
         case ASCOLTO_STATE_IDLE:             return "IDLE";
         case ASCOLTO_STATE_RECORDING_AUTO:   return "RECORDING_AUTO";
         case ASCOLTO_STATE_RECORDING_MANUAL: return "RECORDING_MANUAL";
