@@ -90,7 +90,7 @@ explicit `op://` reference in `ASCOLTO_SECRETS_ENV` / `~/dotfiles/secrets/secret
 resolved by 1Password. A Finder-launched app does not inherit shell environment
 variables. Credentials are not copied into the app configuration.
 
-Enable **Cloud recap (OpenAI + Claude)** in the menu, or use
+Enable **Riepilogo nel cloud (OpenAI + Claude)** in the menu, or use
 `ascoltoctl SET_CLOUD_RECAP on`. The pipeline sends per-channel audio to OpenAI,
 then sends the scrubbed transcript to Claude CLI for the recap. Optional TTS
 sends the scrubbed spoken summary to OpenAI. No cloud request runs merely from

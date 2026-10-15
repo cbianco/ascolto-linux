@@ -129,7 +129,7 @@
     if (st == ASCOLTO_STATE_RECORDING) {
         stateStr = [NSString stringWithFormat:@"Stato: 🔴 In registrazione (%d frasi, %d interlocutori)", snapshot.utterances, snapshot.remote_speakers];
     } else if (st == ASCOLTO_STATE_STOPPING) {
-        stateStr = @"Stopping transcription…";
+        stateStr = @"Stato: Arresto della trascrizione…";
     } else if (st == ASCOLTO_STATE_PAUSED) {
         stateStr = @"Stato: ⏸️ Monitoraggio in pausa";
     }
@@ -148,12 +148,12 @@
     [_statusMenu addItem:outItem];
 
     if (snapshot.call_meta.window_title[0] != '\0') {
-        NSString* wtStr = [NSString stringWithFormat:@"Titolo Finestra: %s", snapshot.call_meta.window_title];
+        NSString* wtStr = [NSString stringWithFormat:@"Titolo finestra: %s", snapshot.call_meta.window_title];
         NSMenuItem* wtItem = [self itemWithTitle:wtStr action:nil key:@""];
         wtItem.enabled = NO;
         [_statusMenu addItem:wtItem];
     } else if (!snapshot.call_meta.ax_trusted) {
-        NSMenuItem* axItem = [self itemWithTitle:@"🔓 Abilita Accessibilità (per leggere titolo finestra call)..." action:@selector(onRequestAccessibility:) key:@""];
+        NSMenuItem* axItem = [self itemWithTitle:@"🔓 Abilita Accessibilità (per leggere il titolo della chiamata)…" action:@selector(onRequestAccessibility:) key:@""];
         [_statusMenu addItem:axItem];
     }
 
@@ -163,7 +163,7 @@
         calItem.enabled = NO;
         [_statusMenu addItem:calItem];
     } else if (!snapshot.call_meta.calendar_authorized) {
-        NSMenuItem* calPermItem = [self itemWithTitle:@"📅 Abilita Calendario (per titolo e partecipanti call)..." action:@selector(onRequestCalendar:) key:@""];
+        NSMenuItem* calPermItem = [self itemWithTitle:@"📅 Abilita Calendario (per titolo e partecipanti della chiamata)…" action:@selector(onRequestCalendar:) key:@""];
         [_statusMenu addItem:calPermItem];
     }
 
@@ -173,8 +173,8 @@
     [_statusMenu addItem:mItem];
 
     NSString* sysPermStr = snapshot.sys_audio_permission_ok
-        ? @"Audio Sistema (SYS): ✅ CoreAudio Tap attivo (no condivisione schermo)"
-        : @"Audio Sistema (SYS): CoreAudio Tap pronto (attiva in Impostazioni se muto)...";
+        ? @"Audio di sistema (SYS): ✅ Acquisizione attiva"
+        : @"Audio di sistema (SYS): Verifica le autorizzazioni nelle Impostazioni…";
     NSMenuItem* permItem = [self itemWithTitle:sysPermStr action:@selector(onRequestSysAudioPermission:) key:@""];
     [_statusMenu addItem:permItem];
 
@@ -215,13 +215,13 @@
     NSMenuItem* saveAudioItem = [self itemWithTitle:@"Salva audio compresso (.m4a ~21 MB/ora)" action:@selector(onToggleSaveAudio:) key:@""];
     saveAudioItem.state = snapshot.config.save_audio ? NSControlStateValueOn : NSControlStateValueOff;
     [_statusMenu addItem:saveAudioItem];
-    NSMenuItem* recapItem = [self itemWithTitle:@"Cloud recap (OpenAI + Claude)" action:@selector(onToggleCloudRecap:) key:@""];
+    NSMenuItem* recapItem = [self itemWithTitle:@"Riepilogo nel cloud (OpenAI + Claude)" action:@selector(onToggleCloudRecap:) key:@""];
     recapItem.state = snapshot.config.cloud_recap ? NSControlStateValueOn : NSControlStateValueOff;
     [_statusMenu addItem:recapItem];
-    NSMenuItem* ttsItem = [self itemWithTitle:@"Generate recap voice (OpenAI TTS)" action:@selector(onToggleRecapTTS:) key:@""];
+    NSMenuItem* ttsItem = [self itemWithTitle:@"Genera audio del riepilogo (OpenAI TTS)" action:@selector(onToggleRecapTTS:) key:@""];
     ttsItem.state = snapshot.config.recap_tts ? NSControlStateValueOn : NSControlStateValueOff;
     [_statusMenu addItem:ttsItem];
-    NSMenuItem* runRecap = [self itemWithTitle:@"Generate recap for the last session" action:@selector(onRunRecap:) key:@""];
+    NSMenuItem* runRecap = [self itemWithTitle:@"Genera riepilogo dell’ultima sessione" action:@selector(onRunRecap:) key:@""];
     runRecap.enabled = snapshot.current_md_path[0] && st != ASCOLTO_STATE_RECORDING && st != ASCOLTO_STATE_STOPPING;
     [_statusMenu addItem:runRecap];
 
@@ -231,7 +231,7 @@
     NSMenuItem* langRoot = [self itemWithTitle:@"Lingua trascrizione (Whistle)" action:nil key:@""];
     NSMenu* langMenu = [[NSMenu alloc] initWithTitle:@"Lingua"];
     struct { const char* code; const char* label; } langs[] = {
-        {"auto", "Rilevamento automatico (Auto)"},
+        {"auto", "Rilevamento automatico"},
         {"it",   "Italiano (it)"},
         {"en",   "English (en)"},
         {"de",   "Deutsch (de)"},
@@ -255,7 +255,7 @@
     const ascolto_macos_device_info_t* devs = _deviceInventory.bytes;
     int n_devs = (int)(_deviceInventory.length / sizeof(*devs));
 
-    NSMenuItem* micRoot = [self itemWithTitle:@"Dispositivo Microfono (Io / ME)" action:nil key:@""];
+    NSMenuItem* micRoot = [self itemWithTitle:@"Dispositivo microfono (Io / ME)" action:nil key:@""];
     NSMenu* micSub = [[NSMenu alloc] initWithTitle:@"Microfono"];
     NSMenuItem* defMicItem = [self itemWithTitle:@"Predefinito di sistema" action:@selector(onSelectMicDevice:) key:@""];
     defMicItem.tag = 0;
@@ -274,9 +274,9 @@
     micRoot.submenu = micSub;
     [_statusMenu addItem:micRoot];
 
-    NSMenuItem* sysRoot = [self itemWithTitle:@"Sorgente Audio Call (Altri / SYS)" action:nil key:@""];
-    NSMenu* sysSub = [[NSMenu alloc] initWithTitle:@"Audio Sistema"];
-    NSMenuItem* autoSysItem = [self itemWithTitle:@"Automatico (Virtual / Loopback)" action:@selector(onSelectSysDevice:) key:@""];
+    NSMenuItem* sysRoot = [self itemWithTitle:@"Sorgente audio chiamata (Altri / SYS)" action:nil key:@""];
+    NSMenu* sysSub = [[NSMenu alloc] initWithTitle:@"Audio di sistema"];
+    NSMenuItem* autoSysItem = [self itemWithTitle:@"Automatico (dispositivo virtuale / loopback)" action:@selector(onSelectSysDevice:) key:@""];
     autoSysItem.tag = 0;
     if (snapshot.config.sys_device_id == 0) autoSysItem.state = NSControlStateValueOn;
     [sysSub addItem:autoSysItem];
@@ -294,8 +294,8 @@
     [_statusMenu addItem:sysRoot];
 
     /* 5. Speaker Diarization Sensitivity Submenu */
-    NSMenuItem* diarRoot = [self itemWithTitle:@"Sensibilità Interlocutori (Diarization)" action:nil key:@""];
-    NSMenu* diarSub = [[NSMenu alloc] initWithTitle:@"Diarization"];
+    NSMenuItem* diarRoot = [self itemWithTitle:@"Sensibilità al riconoscimento degli interlocutori" action:nil key:@""];
+    NSMenu* diarSub = [[NSMenu alloc] initWithTitle:@"Riconoscimento degli interlocutori"];
     struct { float val; const char* label; } presets[] = {
         {0.72f, "Alta — Distingue più interlocutori (0.72)"},
         {0.60f, "Bilanciata — Consigliata (0.60)"},
@@ -318,10 +318,10 @@
     NSMenuItem* openLastItem = [self itemWithTitle:@"Apri ultima trascrizione (.md)" action:@selector(onOpenLastTranscript:) key:@"o"];
     [_statusMenu addItem:openLastItem];
 
-    NSMenuItem* openDirItem = [self itemWithTitle:@"Apri cartella trascrizioni..." action:@selector(onOpenOutputFolder:) key:@""];
+    NSMenuItem* openDirItem = [self itemWithTitle:@"Apri cartella trascrizioni…" action:@selector(onOpenOutputFolder:) key:@""];
     [_statusMenu addItem:openDirItem];
 
-    NSMenuItem* editKwItem = [self itemWithTitle:@"Modifica Keywords personalizzate..." action:@selector(onEditKeywords:) key:@""];
+    NSMenuItem* editKwItem = [self itemWithTitle:@"Modifica parole chiave personalizzate…" action:@selector(onEditKeywords:) key:@""];
     [_statusMenu addItem:editKwItem];
 
     [_statusMenu addItem:[NSMenuItem separatorItem]];
@@ -418,8 +418,9 @@
         if (ascolto_recap_start(&snapshot.config, snapshot.current_md_path, false, false)) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 NSAlert* alert = [NSAlert new];
-                alert.messageText = @"Recap could not start";
-                alert.informativeText = @"Wait for audio finalization and check the Python setup in README.macos.md.";
+                alert.messageText = @"Impossibile avviare il riepilogo";
+                alert.informativeText = @"Attendi il completamento del salvataggio audio e verifica la configurazione di Python descritta in README.macos.md.";
+                [alert addButtonWithTitle:@"Chiudi"];
                 [alert runModal];
             });
         }
