@@ -376,6 +376,8 @@ class Database:
 
     def import_session(self, path, legacy_timezone=None):
         path = Path(path).resolve()
+        if path.name == 'transcript.md' and (path.parent/'Data'/'transcript.jsonl').is_file():
+            path = path.parent/'Data'/'transcript.jsonl'
         if path.suffix == '.md' and path.with_suffix('.jsonl').is_file():
             path = path.with_suffix('.jsonl')
         data = path.read_bytes()
@@ -383,8 +385,10 @@ class Database:
         with self.transaction():
             if self._already_imported(path, digest):
                 return None
-            backend = 'pipewire' if path.name in ('transcript.jsonl', 'transcript.md') else 'coreaudio'
-            stamp_source = path.parent.name if backend == 'pipewire' else path.name
+            call_root = path.parent.parent if path.parent.name == 'Data' else path.parent
+            organized = (call_root/'Data'/'transcript.jsonl').is_file()
+            backend = ('coreaudio' if (call_root/'Audio'/'recording.m4a').exists() else 'pipewire') if organized else ('pipewire' if path.name in ('transcript.jsonl', 'transcript.md') else 'coreaudio')
+            stamp_source = call_root.name if organized or backend == 'pipewire' else path.name
             match = re.search(r'(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:-(\d{6}))?', stamp_source)
             if not match:
                 raise DatabaseError('Legacy session filename has no recognizable timestamp')
@@ -393,7 +397,7 @@ class Database:
                 wall = wall.replace(microsecond=int(match[2]))
             aware = wall.replace(tzinfo=ZoneInfo(legacy_timezone)) if legacy_timezone else wall.astimezone()
             start = int(aware.timestamp() * 1000)
-            md_path = path.with_suffix('.md')
+            md_path = call_root/'transcript.md' if organized else path.with_suffix('.md')
             md = md_path.read_text() if md_path.is_file() else ''
             rows = [json.loads(line) for line in data.decode().splitlines() if line.strip()] if path.suffix == '.jsonl' else _markdown_utterances(data.decode(), backend)
             duration, metadata = None, {'timestamp_source': 'legacy_filename', 'legacy_timezone': str(aware.tzinfo)}
@@ -403,6 +407,8 @@ class Database:
             title, meeting, source = None, None, None
             for row in rows:
                 if row.get('event') in ('session_start', 'call_metadata'):
+                    if organized and row.get('capture_backend') in ('coreaudio','pipewire'):
+                        backend = row['capture_backend']
                     title, meeting, source = row.get('window_title', title), row.get('calendar_title', meeting), row.get('in_app', source)
                     metadata.update({k: row[k] for k in ('manual', 'mic', 'in_app', 'out_app', 'attendees', 'calendar_organizer', 'calendar_notes') if k in row})
                 elif row.get('event') == 'session_end':
@@ -422,8 +428,10 @@ class Database:
             last = self.connection.execute('SELECT max(end_ms) FROM utterances WHERE session_id=?', (session,)).fetchone()[0]
             if duration is not None and last is not None and last > duration:
                 raise DatabaseError('Legacy utterance extends beyond the recorded session duration')
-            pairs = [(path.with_suffix('.md'), 'transcript_md'), (path.with_suffix('.jsonl'), 'transcript_jsonl')]
+            pairs = [(md_path, 'transcript_md'), (path if path.suffix == '.jsonl' else path.with_suffix('.jsonl'), 'transcript_jsonl')]
             pairs += [(path.parent / 'mic.flac', 'audio_mic_flac'), (path.parent / 'sys.flac', 'audio_sys_flac')] if backend == 'pipewire' else [(path.with_suffix('.m4a'), 'audio_m4a')]
+            if organized:
+                pairs += [(call_root/'Audio'/'recording.m4a','audio_m4a'),(call_root/'Audio'/'mic.flac','audio_mic_flac'),(call_root/'Audio'/'sys.flac','audio_sys_flac')]
             for candidate, kind in pairs:
                 if candidate.is_file():
                     self.connection.execute("INSERT INTO artifacts(session_id,kind,path,state,created_at_ms) VALUES(?,?,?,'ready',?)", (session, kind, str(candidate), candidate.stat().st_mtime_ns // 1_000_000))
@@ -455,7 +463,7 @@ class Database:
                 if owner and (owner[0] != session_id or owner[1] != expected):
                     raise DatabaseError('Export path belongs to another artifact')
             lines = ['# Call transcript\n\n']
-            events = [{**json.loads(session['metadata_json']), 'event': 'session_start', 'started_at_ms': session['started_at_ms'], 'window_title': session['call_title'] or '', 'calendar_title': session['meeting_title'] or ''}]
+            events = [{**json.loads(session['metadata_json']), 'event': 'session_start', 'started_at_ms': session['started_at_ms'], 'capture_backend': session['capture_backend'], 'window_title': session['call_title'] or '', 'calendar_title': session['meeting_title'] or ''}]
             for row in rows:
                 speaker = row['speaker'] or row['channel']
                 if session['capture_backend'] == 'pipewire':

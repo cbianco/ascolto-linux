@@ -376,7 +376,7 @@ def prepare_archive(archive, directory, ffmpeg="ffmpeg"):
         for name in ("mic.flac", "sys.flac"):
             os.replace(Path(temporary) / name, directory / name)
     for suffix in (".md", ".jsonl"):
-        source = archive.with_suffix(suffix)
+        source = ((archive.parent.parent/'Data'/'transcript.jsonl' if suffix == '.jsonl' else archive.parent.parent/'transcript.md') if archive.parent.name == 'Audio' else archive.with_suffix(suffix))
         if source.is_file():
             atomic_text(directory / ("transcript" + suffix), source.read_text(encoding="utf-8"))
     atomic_text(directory / "source.json", json.dumps({"archive": str(archive)}, indent=2) + "\n")
@@ -481,12 +481,13 @@ def run(args):
         notify("Ascolto", "MP3 pronto: " + os.path.basename(d))
         return 0
 
-    mic_flac, sys_flac = os.path.join(d, "mic.flac"), os.path.join(d, "sys.flac")
+    audio_dir = str(Path(d)/"Audio") if (Path(d)/"Audio").is_dir() else d
+    mic_flac, sys_flac = os.path.join(audio_dir, "mic.flac"), os.path.join(audio_dir, "sys.flac")
     if not os.path.exists(mic_flac) and not os.path.exists(sys_flac):
         log(f"no FLAC files in {d}")
         return 1
 
-    whistle_sys = load_whistle_speakers(os.path.join(d, "transcript.jsonl"))
+    whistle_sys = load_whistle_speakers(str(Path(d)/"Data"/"transcript.jsonl") if (Path(d)/"Data"/"transcript.jsonl").exists() else os.path.join(d, "transcript.jsonl"))
     try:
         with tempfile.TemporaryDirectory() as tmp:
             mic, sys_ = [], []

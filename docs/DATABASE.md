@@ -105,11 +105,11 @@ audio and evidence contracts, including text recaps with audio saving off.
 
 Enqueue snapshots catalog identity, language and the exact source SHA-256 before
 inference. Attempts increment per session/task, and provisional/final recap phases
-remain distinct. Recap attempts use the visible
-`<output_dir>/Recap/session-<id>/job-<id>/` directory on both platforms; without a
-configured output directory, `Recap` is created beside the transcript. Cloud
-transcription attempts retain `.ai/session-<id>/job-<id>/` beside their source.
-Existing artifact paths remain valid after output-directory changes; previous
+remain distinct. Each call has `transcript.md`, `Audio/` and `Data/transcript.jsonl`.
+Recap attempts use `Recap-history/job-<id>/` inside that call folder, with latest
+final aliases at `recap.md` and `Data/recap.json`. Cloud transcription attempts use
+`Data/Transcription-history/job-<id>/`. Existing artifact paths remain valid after
+archive-directory changes; previous
 notes are preserved on explicit retry. States are
 `queued|validating|running|completed|failed|cancelled`; SQL triggers append
 content-free `job_events`. Store only short sanitized error codes. Commit ready
@@ -167,7 +167,7 @@ then run ordered migration transactions.
 ## Verification
 
 `make test-integration` checks the generated schema, 44 native database checks,
-24 Python database tests, 42 native storage fault/recovery checks and eleven
+24 Python database tests, 46 native storage fault/recovery checks and eleven
 application wiring tests. Coverage includes commit failure, copied queued buffers,
 interrupted two-file publication, metadata, Unicode/apostrophes and relative config
 paths. Tests use temporary data and mocks, without credentials or cloud calls.
@@ -175,3 +175,14 @@ paths. Tests use temporary data and mocks, without credentials or cloud calls.
 GTK, zero restored live counters and menu responsiveness with a busy writer.
 Linux verification compiles an isolated source copy, never the host's macOS
 `bin/` or `build/` outputs.
+
+## Explicit archive reorganization
+
+`scripts/organize_archive.py` previews by default. Its `--apply` mode requires an
+inactive app and no running session or AI job. It creates a sibling full archive
+backup and SQLite backup, verifies copied files, atomically updates artifact paths
+and path-bearing metadata, then removes originals from the active archive. Source
+JSONL retains its fields and citation identity; only known path values relocate.
+Session, utterance and job IDs remain unchanged. A copy/transaction failure retains
+original references and originals. No inference or credential access is involved.
+New-layout transcript imports are supported alongside both older native layouts.

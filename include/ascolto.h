@@ -329,6 +329,7 @@ int ascolto_archive_finalize(const ascolto_config_t* config, const char* mic_raw
                             const char* archive, const char* md_path);
 
 void ascolto_live_app_set_language(ascolto_live_app_t* app, const char* lang);
+int ascolto_live_app_set_output_directory(ascolto_live_app_t* app, const char* path);
 void ascolto_live_app_set_devices(ascolto_live_app_t* app, uint32_t mic_dev_id, uint32_t sys_dev_id);
 void ascolto_live_app_set_diarizer_threshold(ascolto_live_app_t* app, float threshold);
 

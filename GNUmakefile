@@ -61,3 +61,4 @@ test-integration: test-database
 	$(CC) -std=c11 -Wall -Wextra -Werror -Iinclude src/database.c src/storage.c src/ai_settings.c src/filesystem.c tests/storage_main.c -lsqlite3 -lpthread -o bin/ascolto-storage-test
 	./bin/ascolto-storage-test
 	$(RECAP_PYTHON) -m unittest discover -s tests -p test_integration.py
+	$(RECAP_PYTHON) -m unittest discover -s tests -p test_archive_layout.py

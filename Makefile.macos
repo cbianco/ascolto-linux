@@ -37,7 +37,7 @@ APP_BIN  := $(BIN_DIR)/ascolto
 APP_BUNDLE := $(BIN_DIR)/Ascolto.app
 BUNDLE_STAMP := $(APP_BUNDLE)/Contents/.packaged
 RUNTIME_FILES := scripts/recap.py scripts/ai_providers.py scripts/ai_workflows.py \
-                 scripts/ascolto_runtime.py scripts/ascolto_database.py scripts/ascolto_files.py \
+                 scripts/ascolto_runtime.py scripts/ascolto_database.py scripts/ascolto_files.py scripts/organize_archive.py \
                  scripts/database_schema.sql scripts/requirements-recap.txt
 
 .PHONY: all deps fixtures build bundle test test-capture room-bench simulate probe run clean

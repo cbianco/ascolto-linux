@@ -12,9 +12,39 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 extern char **environ;
+
+int ascolto_storage_call_directory(const char *root, const char *title,
+                                    char *out, size_t capacity) {
+  char slug[49] = {0}, stamp[40], child[2300];
+  size_t length = 0;
+  for (const unsigned char *p = (const unsigned char *)(title ? title : "");
+       *p && length < sizeof(slug) - 1; p++) {
+    unsigned char c = *p;
+    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) slug[length++] = c;
+    else if (length && slug[length - 1] != '-') slug[length++] = '-';
+  }
+  while (length && slug[length - 1] == '-') slug[--length] = 0;
+  struct timeval now;
+  gettimeofday(&now, NULL);
+  struct tm local;
+  localtime_r(&now.tv_sec, &local);
+  strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &local);
+  int count = snprintf(out, capacity, "%s/%s-%06ld_%s", root, stamp,
+                       (long)now.tv_usec, length ? slug : "call");
+  if (count < 0 || (size_t)count >= capacity || ascolto_mkdir_p(root) || mkdir(out, 0700)) return -1;
+  const char *children[] = {"Data", "Audio"};
+  for (unsigned i = 0; i < 2; i++) {
+    count = snprintf(child, sizeof(child), "%s/%s", out, children[i]);
+    if (count < 0 || (size_t)count >= sizeof(child) || mkdir(child, 0700)) return -1;
+  }
+  return 0;
+}
 
 int ascolto_storage_open(const char *config, ascolto_db_t **out) {
   if (!config || !*config)
@@ -322,7 +352,7 @@ int ascolto_storage_publish(ascolto_db_t *db, int64_t session) {
       sql,
       "SELECT "
       "json_patch(metadata_json,json_object('event','session_start','started_"
-      "at_ms',started_at_ms,'window_title',coalesce(call_title,''),'calendar_"
+      "at_ms',started_at_ms,'capture_backend',capture_backend,'window_title',coalesce(call_title,''),'calendar_"
       "title',coalesce(meeting_title,''))),capture_backend FROM sessions WHERE "
       "id=?",
       -1, &query, NULL);

@@ -32,6 +32,8 @@ typedef struct {
     ascolto_sensitivity_t selected_sensitivity;
     char keywords_summary[256];
     char settings_keywords[1024];
+    char archive_directory[512];
+    char session_directory[512];
     size_t recent_files_count;
     char recent_files[ASCOLTO_MAX_RECENT_FILES][512];
 } ascolto_tray_snapshot_t;

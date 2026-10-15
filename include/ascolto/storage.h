@@ -15,6 +15,9 @@ int ascolto_storage_flush(const char *config, ascolto_storage_writer_t *writer);
 /* All functions run before UI startup or on existing background action/consumer
  * workers. */
 int ascolto_storage_open(const char *config, ascolto_db_t **out);
+/* Create one private call folder with Data/ and Audio/ subdirectories. */
+int ascolto_storage_call_directory(const char *root, const char *title,
+                                    char *out, size_t capacity);
 /* Restore archive shortcuts without creating a live session or changing
  * counters. */
 int ascolto_storage_latest_transcript(const char *config, char *markdown,

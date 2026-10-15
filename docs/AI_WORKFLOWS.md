@@ -165,9 +165,10 @@ Unknown. The validator establishes citation and field integrity, not semantic
 truth; a plausible but unsupported paraphrase still requires human review.
 
 Final artifacts are `recap.ai.json` and `.md`; provisional snapshots are
-`recap.provisional.ai.json` and `.md`. The application saves them under the visible
-`Recap/session-<id>/job-<id>/` folder in its configured archive directory on macOS
-and Linux. Existing artifacts keep their recorded paths. A caller may submit completed local turns
+`recap.provisional.ai.json` and `.md`. The application retains each attempt under `Recap-history/job-<id>/` in the
+call folder on both platforms. Latest final notes are also published as `recap.md`
+and `Data/recap.json`, beside `transcript.md`. Cloud transcript attempts are
+retained under `Data/Transcription-history/job-<id>/`. Existing artifacts keep their recorded paths. A caller may submit completed local turns
 for a provisional snapshot, then run final notes after stop/drain. This module
 does not start a live cloud note-taking loop. JSON is canonical; Markdown is its
 derived view. All inference must succeed before publishing. Files are atomically

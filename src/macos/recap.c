@@ -55,6 +55,9 @@ int ascolto_recap_start(const ascolto_config_t *config, const char *md_path, boo
     char *suffix = strrchr(archive, '.');
     if (!suffix || strcmp(suffix, ".md")) return -1;
     snprintf(suffix, sizeof(archive) - (size_t)(suffix - archive), ".m4a");
+    if (strrchr(md_path, '/') && !strcmp(strrchr(md_path, '/') + 1, "transcript.md")) {
+        snprintf(archive, sizeof(archive), "%.*s/Audio/recording.m4a", (int)(strrchr(md_path, '/') - md_path), md_path);
+    }
     if ((!mp3_only && access(archive, R_OK)) || ascolto_ai_worker_paths("recap.py", script, sizeof(script), interpreter, sizeof(interpreter))) return -1;
     snprintf(log_path, sizeof(log_path), "%s", config->config_path);
     char *slash = strrchr(log_path, '/');

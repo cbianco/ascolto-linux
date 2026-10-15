@@ -328,10 +328,11 @@ class ProviderManager:
                   "accounts": settings.get("accounts", []), "secure_store": "available",
                   "runtime_ready": all(importlib.util.find_spec(module) for module in ("numpy", "requests", "jwt", "cryptography"))}
         with self.database() as database:
-            from ascolto_runtime import reconcile_jobs
+            from ascolto_runtime import reconcile_jobs, archive_status
             reconcile_jobs(database, self.path)
             result['keywords'] = ', '.join(row[0] for row in database.connection.execute('SELECT text FROM keywords WHERE enabled=1 ORDER BY id'))
             result['settings_section'] = database.settings()['settings_section']
+            result['archive'] = archive_status(database)
             result['jobs'] = [dict(row) for row in database.connection.execute('SELECT id,task,status,model_label_snapshot,error_code FROM recap_jobs ORDER BY id DESC LIMIT 5')]
             result['latest_session_state'] = (database.connection.execute('SELECT state FROM sessions ORDER BY started_at_ms DESC,id DESC LIMIT 1').fetchone() or [''])[0]
         for provider in PROVIDERS:
@@ -577,7 +578,7 @@ class ProviderManager:
 
     def handle(self, request):
         operation = request.get("action", "status")
-        if operation in ("refresh_transcription_models", "transcription_preferences", "recap", "provisional_recap", "transcription", "plan_transcription", "keywords", "section"):
+        if operation in ("archive_path", "refresh_transcription_models", "transcription_preferences", "recap", "provisional_recap", "transcription", "plan_transcription", "keywords", "section"):
             from ascolto_runtime import handle_request
             try:
                 result = handle_request(self, request)

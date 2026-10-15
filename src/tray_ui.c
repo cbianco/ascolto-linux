@@ -68,6 +68,7 @@ typedef struct {
     void *config_menu;
     void *settings_window, *settings_page;
     void *settings_auto, *settings_save, *settings_legacy, *settings_tts, *settings_keywords;
+    void *settings_archive_label;
     void *ai_key, *ai_model, *ai_language, *ai_auto, *ai_account, *ai_use;
     void *stt_model, *stt_consent, *stt_auto;
     int settings_category;
@@ -153,12 +154,14 @@ static void launch_path_nonblocking(const char *path, bool is_dir) {
 
 void ascolto_tray_open_transcripts_folder(ascolto_tray_ui_t *ui) {
     if (!ui || !ui->core) return;
-    launch_path_nonblocking(ui->core->config.output_dir, true);
+    ascolto_tray_snapshot_t snapshot; ascolto_tray_get_snapshot(ui,&snapshot);
+    launch_path_nonblocking(snapshot.archive_directory, true);
 }
 
 void ascolto_tray_open_session_folder(ascolto_tray_ui_t *ui) {
     if (!ui || !ui->core) return;
-    const char *dir = ui->core->current_session_dir[0] ? ui->core->current_session_dir : ui->core->config.output_dir;
+    ascolto_tray_snapshot_t snapshot; ascolto_tray_get_snapshot(ui,&snapshot);
+    const char *dir = snapshot.session_directory[0] ? snapshot.session_directory : snapshot.archive_directory;
     launch_path_nonblocking(dir, true);
 }
 
@@ -166,7 +169,7 @@ static void apply_snapshot_to_gtk_main_thread(ascolto_tray_ui_t *ui);
 
 typedef enum { MENU_START, MENU_STOP, MENU_PAUSE, MENU_RESUME, MENU_AUTO,
     MENU_AUDIO, MENU_CLOUD, MENU_TTS, MENU_LANGUAGE, MENU_MIC, MENU_SYS, MENU_SPEAKERS,
-    MENU_RECAP, MENU_MP3, MENU_LEGACY_RECAP, MENU_KEYWORDS } menu_action_t;
+    MENU_RECAP, MENU_MP3, MENU_LEGACY_RECAP, MENU_KEYWORDS, MENU_OUTPUT } menu_action_t;
 typedef struct { ascolto_tray_ui_t *ui; menu_action_t kind; char value[1024]; } menu_request_t;
 
 static void menu_action_worker(gpointer data, gpointer unused) {
@@ -199,6 +202,7 @@ static void menu_action_worker(gpointer data, gpointer unused) {
         }
         case MENU_LEGACY_RECAP: result = ascolto_core_run_recap(c, NULL); break;
         case MENU_KEYWORDS: result = ascolto_core_set_keywords(c, r->value); break;
+        case MENU_OUTPUT: result = ascolto_core_set_output_directory(c, r->value); break;
         case MENU_MP3: result = ascolto_core_make_mp3(c, NULL); break;
     }
     g_atomic_int_set(&p->action_failed, result ? r->kind + 1 : 0);
@@ -360,7 +364,7 @@ static void on_menu_open_folder(void *widget, gpointer user_data) {
     (void)widget;
     ascolto_tray_ui_t *ui = (ascolto_tray_ui_t *)user_data;
     if (!ui || !ui->core) return;
-    launch_path_nonblocking(ui->core->config.output_dir, true);
+    ascolto_tray_open_transcripts_folder(ui);
 }
 
 static void on_menu_quit(void *widget, gpointer user_data) {
@@ -709,6 +713,8 @@ void ascolto_tray_update(ascolto_tray_ui_t *ui) {
     ascolto_tray_snapshot_t *s = &ui->snapshot;
     s->active = true;
     s->storage_error = core->storage_error;
+    snprintf(s->archive_directory,sizeof(s->archive_directory),"%s",core->config.output_dir);
+    snprintf(s->session_directory,sizeof(s->session_directory),"%s",core->current_session_dir);
     s->menu_stopping = core->state == ASCOLTO_STATE_STOPPING;
     snprintf(s->session_app, sizeof(s->session_app), "%s", core->active_mic_app);
     snprintf(s->latest_phrase, sizeof(s->latest_phrase), "%.255s",

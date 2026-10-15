@@ -90,6 +90,7 @@ int ascolto_core_make_mp3(ascolto_core_t *core, const char *md_path);
 int ascolto_core_set_recap_lang(ascolto_core_t *core, const char *lang);
 int ascolto_core_set_tts_lang(ascolto_core_t *core, const char *lang);
 int ascolto_core_set_language(ascolto_core_t *core, const char *lang);
+int ascolto_core_set_output_directory(ascolto_core_t *core, const char *path);
 int ascolto_core_set_mic_device(ascolto_core_t *core, const char *dev);
 int ascolto_core_set_sys_device(ascolto_core_t *core, const char *dev);
 int ascolto_core_set_sensitivity(ascolto_core_t *core, ascolto_sensitivity_t sens);

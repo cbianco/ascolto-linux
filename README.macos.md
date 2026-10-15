@@ -92,14 +92,28 @@ speech missing from the local transcript. MIC stays ME; SYS is UNKNOWN with
 local speaker evidence recorded separately. ChatGPT sign-in supports text only.
 No provider or model fallback occurs.
 
-Recaps live in the visible `Recap/session-<id>/job-<id>/` folder inside the
-configured archive directory. Cloud transcripts remain in the private
-`.ai/session-<id>/job-<id>/` folder beside the original transcript.
-Final `recap.ai.json`/`.md`, provisional
-`recap.provisional.ai.json`/`.md`, and optional `transcript.cloud.ai.jsonl`/`.md`
-retain each attempt. Originals remain in place. The database records job states,
-content-free transition history, selected model snapshots, and artifact paths.
-Disconnected or unavailable selections disable automation.
+Each new call has a timestamped, title-based folder containing `transcript.md`
+and the latest final `recap.md`. `Audio/` contains `recording.m4a`; `Data/` contains
+`transcript.jsonl` and the latest `recap.json`. Immutable AI attempts remain in
+`Recap-history/job-<id>/`; optional cloud transcripts use
+`Data/Transcription-history/job-<id>/`. Linux uses the same layout with separate
+`Audio/mic.flac` and `Audio/sys.flac` files.
+
+Settings > Storage offers a native archive-folder chooser and shortcuts to the
+latest call, transcript and recap. A changed folder applies to new calls; existing
+sessions continue using their saved paths. Disconnecting a provider keeps files.
+
+To reorganize an existing archive, quit Ascolto and run:
+
+```sh
+python3 scripts/organize_archive.py --config ~/.config/ascolto/config.json
+python3 scripts/organize_archive.py --config ~/.config/ascolto/config.json --apply
+```
+
+The first command previews the plan. Applying creates a complete sibling archive
+backup and SQLite snapshot before copying files, verifies file hashes, updates
+artifact paths without changing session/utterance IDs, and only then removes old
+copies. Missing transcripts are reported and left untouched. The backup remains.
 
 Prepare the Python runtime before packaging:
 

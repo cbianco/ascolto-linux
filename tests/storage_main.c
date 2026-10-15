@@ -48,6 +48,14 @@ int main(void) {
   char directory[] = "/tmp/ascolto-storage-XXXXXX";
   if (!mkdtemp(directory))
     return 1;
+  char call[1024], child[1100];
+  CHECK(!ascolto_storage_call_directory(directory, "../Team / Sync!", call, sizeof(call)));
+  CHECK(strstr(call, "_team-sync") != NULL);
+  snprintf(child,sizeof(child),"%s/Data",call);
+  struct stat folder_mode;
+  CHECK(!stat(child,&folder_mode) && S_ISDIR(folder_mode.st_mode) && (folder_mode.st_mode&0777)==0700);
+  char short_path[4];
+  CHECK(ascolto_storage_call_directory(directory,"Call",short_path,sizeof(short_path)) != 0);
   char config[1024], md[1024], jsonl[1024], audio[1024];
   snprintf(config, sizeof(config), "%s/config.json", directory);
   snprintf(md, sizeof(md), "%s/Ω's call.md", directory);

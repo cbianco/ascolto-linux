@@ -86,9 +86,9 @@ int main(void) {
       /* A changed future output directory must not hide an existing archive
        * reference. */
       if (!launch) {
-        snprintf(app.config.output_dir, sizeof(app.config.output_dir), "%s",
-                 future_output);
-        assert(!ascolto_config_save(&app.config, NULL));
+        assert(!ascolto_live_app_set_output_directory(&app, future_output));
+        assert(ascolto_live_app_set_output_directory(&app, "relative/path"));
+        assert(!strcmp(app.config.output_dir, future_output));
       }
       ascolto_live_app_free(&app);
     }

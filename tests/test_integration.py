@@ -157,7 +157,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertTrue((self.folder/'call.jsonl').exists())
         self.assertFalse(list(self.folder.glob('*.wav')))
 
-    def test_recaps_use_visible_archive_folder_and_preserve_previous_locations(self):
+    def test_recaps_stay_with_their_call_and_preserve_attempts_after_output_change(self):
         self.session()
         archive = (self.folder/'archive').resolve()
         archive.mkdir()
@@ -166,11 +166,15 @@ class IntegrationTests(unittest.TestCase):
         first = handle_request(self.manager, {'action': 'recap'})
         first_path = Path(first['output_dir'])/'recap.ai.md'
         original = first_path.read_bytes()
-        self.assertEqual(first_path.relative_to(archive).parts[0], 'Recap')
+        self.assertEqual(first_path.parent.parent.name, 'Recap-history')
+        self.assertTrue((Path(first['session_dir'])/'recap.md').is_file())
+        self.assertTrue((Path(first['session_dir'])/'Data'/'recap.json').is_file())
         with self.manager.database() as db:
             db.update_settings({'output_dir': str(self.folder/'new-archive')})
         second = handle_request(self.manager, {'action': 'recap'})
-        self.assertTrue(Path(second['output_dir']).is_relative_to((self.folder/'new-archive'/'Recap').resolve()))
+        self.assertEqual(first['session_dir'], second['session_dir'])
+        opened = handle_request(self.manager, {'action':'archive_path','kind':'recap'})
+        self.assertTrue(Path(opened['open_path']).is_file())
         self.assertEqual(first_path.read_bytes(), original)
         with self.manager.database() as db:
             self.assertEqual(db.connection.execute('SELECT path FROM artifacts WHERE recap_job_id=? AND kind=?', (first['job_id'], 'recap_md')).fetchone()[0], str(first_path))

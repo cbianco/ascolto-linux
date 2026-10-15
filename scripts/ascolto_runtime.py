@@ -9,6 +9,27 @@ from pathlib import Path
 import sys
 
 from ascolto_database import Database, DatabaseError, now_ms
+from ascolto_files import atomic_text
+
+
+def session_directory(db, session):
+    source = db.connection.execute("SELECT path FROM artifacts WHERE session_id=? AND kind='transcript_md' AND state='ready'", (session,)).fetchone()
+    if not source:
+        raise DatabaseError('The session has no saved transcript')
+    path = Path(source[0])
+    return path.parent if path.name == 'transcript.md' else path.with_suffix('')
+
+
+def archive_status(db):
+    result = {'directory': db.settings()['output_dir']}
+    row = db.connection.execute("SELECT session_id,path FROM artifacts WHERE kind='transcript_md' AND state='ready' ORDER BY (SELECT started_at_ms FROM sessions WHERE id=session_id) DESC,session_id DESC LIMIT 1").fetchone()
+    if row:
+        result.update(transcript=row['path'], call_directory=str(session_directory(db, row['session_id'])))
+        recap = db.connection.execute("SELECT a.path FROM artifacts a JOIN recap_jobs j ON a.recap_job_id=j.id WHERE a.session_id=? AND a.kind='recap_md' AND a.state='ready' AND j.status='completed' ORDER BY (j.phase='final') DESC,j.id DESC,a.id DESC LIMIT 1", (row['session_id'],)).fetchone()
+        if recap:
+            alias = session_directory(db, row['session_id'])/'recap.md'
+            result['recap'] = str(alias) if alias.is_file() else recap[0]
+    return result
 
 
 def bootstrap(config, platform):
@@ -31,6 +52,7 @@ def bootstrap(config, platform):
                 if output:
                     folder = Path(output).expanduser()
                     candidates = list(folder.glob('????-??-??_??-??-??*_call.jsonl')) if platform == 'macos' else list(folder.glob('call_????-??-??_??-??-??_*/transcript.jsonl'))
+                    candidates += list(folder.glob('????-??-??_*/Data/transcript.jsonl'))
                     candidates += [p for p in (folder.glob('????-??-??_??-??-??*_call.md') if platform == 'macos' else folder.glob('call_????-??-??_??-??-??_*/transcript.md')) if not p.with_suffix('.jsonl').exists()]
                     known = {r[0] for r in db.connection.execute('SELECT path FROM artifacts')}
                     for source in sorted(candidates):
@@ -81,6 +103,14 @@ def handle_request(manager, request):
         models = refresh_transcription_models(manager)
         return {'message': f'Loaded {len(models)} dedicated OpenRouter transcription models.'}
     with manager.database() as db:
+        if operation == 'archive_path':
+            kind = request.get('kind')
+            if kind not in ('call_directory', 'transcript', 'recap'):
+                raise DatabaseError('Choose a supported archive item')
+            path = archive_status(db).get(kind)
+            if not path or not Path(path).exists():
+                raise WorkflowError('not_available', 'No saved file is available for this session yet.')
+            return {'open_path': path, 'is_directory': kind == 'call_directory'}
         if operation == 'section':
             db.update_settings({'settings_section': request['section']})
             return {}
@@ -160,13 +190,10 @@ def handle_request(manager, request):
             job = db.enqueue_job(task, session, preference['connection_id'], chosen.model, selection['language'], digest)
             if operation == 'provisional_recap':
                 db.connection.execute("UPDATE recap_jobs SET phase='provisional' WHERE id=?", (job,))
-            if transcription:
-                output_root = Path(source[0]).parent / '.ai'
-            else:
-                archive_directory = db.settings()['output_dir']
-                output_root = (Path(archive_directory).expanduser().resolve() if archive_directory else Path(source[0]).parent) / 'Recap'
-            output = output_root / f'session-{session}' / f'job-{job}'
-            for directory in (output.parent.parent, output.parent, output):
+            call_directory = session_directory(db, session)
+            output_root = call_directory / ('Data/Transcription-history' if transcription else 'Recap-history')
+            output = output_root / f'job-{job}'
+            for directory in (output_root, output):
                 directory.mkdir(parents=True, exist_ok=True, mode=0o700)
                 os.chmod(directory, 0o700)
             def event_sink(event):
@@ -188,8 +215,11 @@ def handle_request(manager, request):
                     for filename, kind in artifacts:
                         target = output / filename
                         db.register_artifact(session, kind, target, job_id=job, sha256=hashlib.sha256(target.read_bytes()).hexdigest())
+                    if not transcription and mode == 'final':
+                        for filename, target in ((prefix+'.json', call_directory/'Data'/'recap.json'), (prefix+'.md', call_directory/'recap.md')):
+                            atomic_text(target, (output/filename).read_text(encoding='utf-8'))
                     db.update_job(job, 'completed')
-                return {'job_id': job, 'output_dir': str(output), 'message': f'{task.capitalize()} completed. Artifacts: {output}', 'plan': plan}
+                return {'job_id': job, 'output_dir': str(output), 'session_dir': str(call_directory), 'message': f'{task.capitalize()} completed. Artifacts: {call_directory}', 'plan': plan}
             except BaseException as error:
                 code = getattr(error, 'code', 'workflow_error')
                 db.update_job(job, 'failed', error_code=code if isinstance(code, str) and code.replace('_', '').isalnum() and len(code) <= 64 else 'workflow_error')

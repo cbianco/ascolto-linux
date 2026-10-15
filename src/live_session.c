@@ -1,6 +1,7 @@
 #include "ascolto.h"
 #include "macos/transcript.h"
 #include "ascolto/storage.h"
+#include "ascolto/filesystem.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -396,6 +397,16 @@ void ascolto_live_app_set_language(ascolto_live_app_t* app, const char* lang) {
     snprintf(app->config.language, sizeof(app->config.language), "%s", lang);
     save_preferences_unlocked(app, &previous);
     pthread_mutex_unlock(&app->lock);
+}
+
+int ascolto_live_app_set_output_directory(ascolto_live_app_t* app, const char* path) {
+    if (!app || !path || path[0] != '/' || strlen(path) >= sizeof(app->config.output_dir) || ascolto_mkdir_p(path)) return -1;
+    pthread_mutex_lock(&app->lock);
+    ascolto_config_t previous = app->config;
+    snprintf(app->config.output_dir, sizeof(app->config.output_dir), "%s", path);
+    bool saved = save_preferences_unlocked(app, &previous);
+    pthread_mutex_unlock(&app->lock);
+    return saved ? 0 : -1;
 }
 
 void ascolto_live_app_set_devices(ascolto_live_app_t* app, uint32_t mic_dev_id, uint32_t sys_dev_id) {

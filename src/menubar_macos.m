@@ -412,7 +412,7 @@ static NSString* menu_text(const char* text) {
     openLastItem.enabled = snapshot.current_md_path[0] != 0;
     [_statusMenu addItem:openLastItem];
 
-    NSMenuItem* openDirItem = [self itemWithTitle:@"Open transcripts folder…" action:@selector(onOpenOutputFolder:) key:@""];
+    NSMenuItem* openDirItem = [self itemWithTitle:@"Open archive folder…" action:@selector(onOpenOutputFolder:) key:@""];
     [_statusMenu addItem:openDirItem];
 
 
@@ -607,6 +607,21 @@ static NSString* menu_text(const char* text) {
     ascolto_live_snapshot_t snapshot;
     ascolto_live_app_read_snapshot(_app, &snapshot);
     [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:[NSString stringWithUTF8String:snapshot.config.output_dir]]];
+}
+
+- (void)onChangeOutputFolder:(id)sender {
+    (void)sender;
+    NSOpenPanel* panel=[NSOpenPanel openPanel];
+    panel.canChooseDirectories=YES;panel.canChooseFiles=NO;panel.canCreateDirectories=YES;
+    panel.message=@"Choose where new calls are saved. Existing calls keep their current paths.";
+    [panel beginWithCompletionHandler:^(NSModalResponse result){
+        if(result!=NSModalResponseOK)return;
+        NSString* path=panel.URL.path;
+        [self performSessionAction:^(ascolto_live_app_t* app){
+            if(ascolto_live_app_set_output_directory(app,path.fileSystemRepresentation))
+                dispatch_async(dispatch_get_main_queue(), ^{NSAlert* alert=[NSAlert new];alert.messageText=@"Could not save the archive folder";alert.informativeText=@"Check the folder path and write permissions.";[alert runModal];});
+        }];
+    }];
 }
 
 - (void)onEditKeywords:(id)sender {

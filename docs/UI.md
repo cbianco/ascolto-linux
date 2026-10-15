@@ -101,9 +101,12 @@ selects Use for recaps, and separately enables automatic recaps, which default
 to off. Choosing the new provider workflow disables legacy automatic cloud
 processing. Finishing a session sends only the existing local transcript through
 the existing scrubber, including when audio archives are disabled. No audio
-format conversion or speech API is involved. Recaps live in the visible
-`Recap/session-<id>/job-<id>/` folder inside the configured archive directory;
-cloud transcripts retain `.ai/session-<id>/job-<id>/` beside the source transcript.
+format conversion or speech API is involved. Each call folder keeps `transcript.md` and the latest final `recap.md` together.
+`Audio/` contains recordings, `Data/` contains JSON/JSONL, and `Recap-history/`
+retains immutable AI attempts. Storage provides a native folder chooser and
+shortcuts to the latest call, transcript and recap. Changing the archive folder
+applies to new calls and preserves existing references. Cloud transcript attempts
+use `Data/Transcription-history/` inside the same call folder.
 Provisional and final artifacts remain distinct; local Markdown, JSONL, M4A,
 and FLAC remain intact. Truncated, failed,
 or interrupted responses preserve an existing recap. There is no automatic

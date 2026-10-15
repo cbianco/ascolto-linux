@@ -49,6 +49,7 @@
 @property NSString* provider;
 @property NSDictionary* settings;
 @property NSTextField* notice;
+@property NSTextField* archiveLocation;
 @property NSSecureTextField* secureKey;
 @property NSTextField* plainKey;
 @property NSPopUpButton* model;
@@ -162,7 +163,7 @@
     for (NSView* view in _sidebar.subviews) if ([view isKindOfClass:NSButton.class]) {
         NSButton* button = (NSButton*)view; button.state = [button.identifier isEqual:_category];
     }
-    _notice = nil; _monitoring = nil; _saveAudio = nil; _legacy = nil; _legacyTTS = nil;
+    _notice = nil; _archiveLocation = nil; _monitoring = nil; _saveAudio = nil; _legacy = nil; _legacyTTS = nil;
     _page.layer.backgroundColor = NSColor.controlBackgroundColor.CGColor;
     [self addLabel:_category y:704 size:25 bold:YES];
     NSDictionary* values = _options();
@@ -209,11 +210,16 @@
         _legacyTTS = [self nativeButton:@"Legacy spoken recap (OpenAI TTS)" selector:@selector(onToggleRecapTTS:) y:164 check:YES value:[values[@"tts"] boolValue]];
         [self nativeButton:@"Generate latest legacy cloud recap" selector:@selector(onRunLegacyRecap:) y:112 check:NO value:NO];
     } else if ([_category isEqual:@"Storage"]) {
-        [self addLabel:@"Transcript archive folder" y:624 size:17 bold:YES];
+        [self addLabel:@"Archive folder" y:624 size:17 bold:YES];
         NSTextField* location = [self label:values[@"output"] size:14 bold:NO];
+        _archiveLocation = location;
         location.selectable = YES; location.frame = NSMakeRect(30, 558, 740, 50); [_page addSubview:location];
-        [self nativeButton:@"Open transcripts folder…" selector:@selector(onOpenOutputFolder:) y:498 check:NO value:NO];
-        [self addLabel:@"Transcripts and archives remain in this folder when a provider is disconnected. AI outputs retain each attempt in a private .ai folder beside the original transcript." y:414 size:13 bold:NO];
+        NSButton* folder=[self nativeButton:@"Open archive folder…" selector:@selector(onOpenOutputFolder:) y:498 check:NO value:NO];folder.frame=NSMakeRect(30,498,300,32);
+        NSButton* change=[self nativeButton:@"Change folder…" selector:@selector(onChangeOutputFolder:) y:498 check:NO value:NO];change.frame=NSMakeRect(350,498,240,32);
+        [self addLabel:@"Each call keeps transcript.md and recap.md together, with Audio, Data and Recap-history folders. Folder changes apply to new calls; existing files keep their paths." y:430 size:12 bold:NO];
+        NSArray* kinds=@[@"call_directory",@"transcript",@"recap"];
+        NSArray* titles=@[@"Open latest call",@"Open transcript",@"Open recap"];
+        for(NSUInteger i=0;i<kinds.count;i++){NSButton* open=[self button:titles[i] action:@selector(openArchiveItem:)];open.identifier=kinds[i];open.frame=NSMakeRect(30+i*250,370,240,32);open.enabled=!_busy;[_page addSubview:open];}
         NSButton* provisional=[self button:@"Provisional recap so far" action:@selector(runProvisional:)];provisional.frame=NSMakeRect(30,320,300,32);provisional.enabled=!_busy;[_page addSubview:provisional];
         NSButton* final=[self button:@"Generate final recap of latest session" action:@selector(runFinal:)];final.frame=NSMakeRect(30,274,380,32);final.enabled=!_busy;[_page addSubview:final];
         NSButton* status=[self button:@"Refresh AI job status" action:@selector(refreshJobStatus:)];status.frame=NSMakeRect(30,224,260,32);status.enabled=!_busy;[_page addSubview:status];
@@ -407,9 +413,10 @@
             if (!strongSelf || strongSelf.worker != task) return;
             strongSelf.worker = nil; strongSelf.busy = NO;
             if ([result[@"ok"] boolValue]) {
+                NSString* openPath=result[@"result"][@"open_path"];if([openPath isKindOfClass:NSString.class])[[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:openPath]];
                 if(!strongSelf.settings){NSString* saved=result[@"settings"][@"settings_section"];if([@[@"General",@"AI providers",@"Transcription",@"Recording",@"Storage"] containsObject:saved])strongSelf.category=saved;}
                 strongSelf.settings = result[@"settings"];
-                if([result[@"result"][@"output_dir"] isKindOfClass:NSString.class])strongSelf.latestAIOutput=result[@"result"][@"output_dir"];
+                if([result[@"result"][@"session_dir"] isKindOfClass:NSString.class])strongSelf.latestAIOutput=result[@"result"][@"session_dir"];
                 if ([request[@"action"] isEqual:@"use"] || ([request[@"action"] isEqual:@"preferences"] && [request[@"automatic_recaps"] boolValue]))
                     [NSApp sendAction:@selector(onSelectAIRecap:) to:strongSelf.actionTarget from:strongSelf];
                 strongSelf.message = [result[@"message"] length] ? result[@"message"] : nil;
@@ -435,6 +442,7 @@
 - (void)runProvisional:(id)sender { (void)sender; [self request:@{@"action":@"provisional_recap"}]; }
 - (void)runFinal:(id)sender { (void)sender; [self request:@{@"action":@"recap"}]; }
 - (void)refreshJobStatus:(id)sender { (void)sender; [self request:@{@"action":@"status"}]; }
+- (void)openArchiveItem:(NSButton*)sender { [self request:@{@"action":@"archive_path",@"kind":sender.identifier}]; }
 
 - (void)performAITask:(NSString*)action {
     _closing=NO; _category=@"Storage";
@@ -452,6 +460,7 @@
 - (void)menuDidClose:(NSMenu*)menu { (void)menu; _nativeMenuTracking = NO; }
 - (void)refreshNativeValues {
     NSDictionary* values = _options();
+    _archiveLocation.stringValue = values[@"output"] ?: @"";
     [self.window.effectiveAppearance performAsCurrentDrawingAppearance:^{
         self.sidebar.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;
         self.page.layer.backgroundColor = NSColor.controlBackgroundColor.CGColor;

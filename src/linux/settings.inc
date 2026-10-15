@@ -40,6 +40,11 @@ SF(void, gtk_widget_set_size_request, (void*, int, int));
 SF(void, gtk_widget_hide, (void*));
 SF(void*, gtk_scrolled_window_new, (void*, void*));
 SF(void, gtk_scrolled_window_set_policy, (void*, int, int));
+SF(void*, gtk_file_chooser_native_new, (const char*, void*, int, const char*, const char*));
+SF(char*, gtk_file_chooser_get_filename, (void*));
+SF(gboolean, gtk_file_chooser_set_current_folder, (void*, const char*));
+SF(void, gtk_native_dialog_show, (void*));
+SF(void, gtk_native_dialog_destroy, (void*));
 #undef SF
 
 static void settings_build(ascolto_tray_ui_t *ui);
@@ -108,6 +113,9 @@ static void settings_worker_done(GObject *object, GAsyncResult *result, gpointer
     }
     g_free(p->ai_message); p->ai_message = NULL;
     if (setting_bool(response, "ok")) {
+        JsonObject *task_result=setting_object(response,"result");
+        const char *open_path=setting_string(task_result,"open_path","");
+        if(*open_path)launch_path_nonblocking(open_path,setting_bool(task_result,"is_directory"));
         JsonObject *state = setting_object(response, "settings");
         if(!p->ai_state){const char *saved=setting_string(state,"settings_section","");const char *sections[]={"General","AI providers","Transcription","Recording","Storage"};for(int i=0;i<5;i++)if(!strcmp(saved,sections[i]))p->settings_category=i;}
         if (p->ai_state) json_object_unref(p->ai_state);
@@ -115,7 +123,7 @@ static void settings_worker_done(GObject *object, GAsyncResult *result, gpointer
         const char *action = g_object_get_data(object, "ascolto-ai-action");
         if ((action && !strcmp(action, "use")) || setting_bool(p->ai_state, "automatic_recaps")) queue_menu_action(ui, MENU_CLOUD, "0");
         p->ai_message = g_strdup(setting_string(response, "message", ""));
-        const char *output_dir=setting_string(setting_object(response,"result"),"output_dir","");if(*output_dir){g_free(p->ai_output_dir);p->ai_output_dir=g_strdup(output_dir);}
+        const char *output_dir=setting_string(setting_object(response,"result"),"session_dir","");if(*output_dir){g_free(p->ai_output_dir);p->ai_output_dir=g_strdup(output_dir);}
         JsonObject *profile = setting_object(setting_object(p->ai_state, "profiles"), "openai");
         if (setting_bool(profile, "welcome_pending")) {
             g_free(p->ai_message); p->ai_message = g_strdup("You're using your ChatGPT plan. Eligible requests use your plan. Manage usage in ChatGPT settings. Select Got it to continue.");
@@ -148,6 +156,24 @@ static void settings_request(ascolto_tray_ui_t *ui, JsonObject *request) {
         g_subprocess_communicate_utf8_async(p->ai_worker, input, NULL, settings_worker_done, NULL);
     }
     g_free(input); g_free(action); g_clear_error(&error); settings_build(ui);
+}
+
+static void settings_open_item(void *widget, gpointer data) {
+    JsonObject *request=settings_command("archive_path",NULL);
+    json_object_set_string_member(request,"kind",g_object_get_data(G_OBJECT(widget),"archive-kind"));
+    settings_request(data,request);
+}
+static void settings_folder_response(void *dialog, int response, gpointer data) {
+    if(response==-3){char *path=s_gtk_file_chooser_get_filename(dialog);if(path){queue_menu_action(data,MENU_OUTPUT,path);g_free(path);}}
+    s_gtk_native_dialog_destroy(dialog);g_object_unref(dialog);
+}
+static void settings_change_folder(void *widget, gpointer data) {
+    (void)widget;ascolto_tray_ui_t *ui=data;gtk_tray_priv_t *p=ui->gtk_impl;
+    void *dialog=s_gtk_file_chooser_native_new("Choose archive folder for new calls",p->settings_window,2,"Choose","Cancel");
+    ascolto_tray_snapshot_t snapshot;ascolto_tray_get_snapshot(ui,&snapshot);
+    s_gtk_file_chooser_set_current_folder(dialog,snapshot.archive_directory);
+    g_signal_connect_data(dialog,"response",G_CALLBACK(settings_folder_response),ui,NULL,0);
+    s_gtk_native_dialog_show(dialog);
 }
 static void settings_provider(void *widget, gpointer data) {
     ascolto_tray_ui_t *ui = data; gtk_tray_priv_t *p = ui->gtk_impl;
@@ -280,6 +306,7 @@ static void settings_build(ascolto_tray_ui_t *ui) {
     for (GList *it = children; it; it = it->next) p->gtk_widget_destroy(it->data);
     g_list_free(children);
     p->settings_auto = p->settings_save = p->settings_legacy = p->settings_tts = NULL;
+    p->settings_archive_label = NULL;
     ascolto_tray_snapshot_t snap; ascolto_tray_get_snapshot(ui, &snap);
     if(snap.storage_error)settings_label(p,p->settings_page,"Transcript storage failed. Local artifacts are retained; review the database and storage permissions.");
     const char *categories[] = {"General", "AI providers", "Transcription", "Recording", "Storage"};
@@ -339,10 +366,13 @@ static void settings_build(ascolto_tray_ui_t *ui) {
         p->settings_tts = settings_native_check(ui, p->settings_page, "Legacy spoken recap (OpenAI TTS)", MENU_TTS, snap.menu_recap_tts_checked);
         settings_button(ui, p->settings_page, "Generate latest legacy cloud recap", G_CALLBACK(settings_legacy_recap));
     } else if (p->settings_category == 4) {
-        settings_label(p, p->settings_page, "Transcript archive folder");
-        void *location = settings_label(p, p->settings_page, ui->core->config.output_dir); s_gtk_label_set_selectable(location, TRUE);
-        settings_button(ui, p->settings_page, "Open transcripts folder…", G_CALLBACK(on_menu_open_folder));
-        settings_label(p, p->settings_page, "Disconnecting a provider keeps every transcript and audio archive. Recaps are written to a separate recap.md file in the session folder.");
+        settings_label(p, p->settings_page, "Archive folder");
+        void *location = settings_label(p, p->settings_page, snap.archive_directory); p->settings_archive_label=location; s_gtk_label_set_selectable(location, TRUE);
+        settings_button(ui, p->settings_page, "Open archive folder…", G_CALLBACK(on_menu_open_folder));
+        settings_button(ui,p->settings_page,"Change folder…",G_CALLBACK(settings_change_folder));
+        settings_label(p,p->settings_page,"Each call keeps transcript.md and recap.md together, with Audio, Data and Recap-history folders. Folder changes apply to new calls; existing calls keep their paths.");
+        const char *kinds[]={"call_directory","transcript","recap"};const char *titles[]={"Open latest call","Open transcript","Open recap"};
+        for(int i=0;i<3;i++){void *button=settings_button(ui,p->settings_page,titles[i],G_CALLBACK(settings_open_item));g_object_set_data(G_OBJECT(button),"archive-kind",(gpointer)kinds[i]);p->gtk_widget_set_sensitive(button,p->ai_worker==NULL);}
         settings_task_button(ui,p->settings_page,"Provisional recap so far","provisional_recap");
         settings_task_button(ui,p->settings_page,"Generate final recap of latest session","recap");
         settings_task_button(ui,p->settings_page,"Refresh AI job status","status");
@@ -442,6 +472,7 @@ static void on_menu_settings(void *widget, gpointer data) {
         SL(gtk_entry_new); SL(gtk_entry_set_text); SL(gtk_entry_get_text); SL(gtk_entry_set_visibility); SL(gtk_entry_set_placeholder_text); SL(gtk_entry_set_max_length);
         SL(gtk_combo_box_text_new); SL(gtk_combo_box_text_append); SL(gtk_combo_box_set_active_id); SL(gtk_combo_box_get_active_id);
         SL(gtk_widget_set_size_request); SL(gtk_widget_hide); SL(gtk_scrolled_window_new); SL(gtk_scrolled_window_set_policy);
+        SL(gtk_file_chooser_native_new);SL(gtk_file_chooser_get_filename);SL(gtk_file_chooser_set_current_folder);SL(gtk_native_dialog_show);SL(gtk_native_dialog_destroy);
 #undef SL
         p->settings_window = s_gtk_window_new(0); s_gtk_window_set_title(p->settings_window, "Ascolto Settings"); s_gtk_window_set_default_size(p->settings_window, 1000, 780);
         g_signal_connect_data(p->settings_window, "delete-event", G_CALLBACK(settings_delete), ui, NULL, 0);
@@ -462,6 +493,7 @@ static void settings_sync(ascolto_tray_ui_t *ui, const ascolto_tray_snapshot_t *
     gtk_tray_priv_t *p = ui->gtk_impl;
     if (!p->settings_window) return;
     p->settings_building = true;
+    if(p->settings_archive_label)s_gtk_label_set_text(p->settings_archive_label,snapshot->archive_directory);
     if (p->settings_auto) s_gtk_toggle_button_set_active(p->settings_auto, snapshot->menu_auto_mic_checked);
     if (p->settings_save) s_gtk_toggle_button_set_active(p->settings_save, snapshot->menu_save_audio_checked);
     if (p->settings_legacy) s_gtk_toggle_button_set_active(p->settings_legacy, snapshot->menu_cloud_recap_checked);

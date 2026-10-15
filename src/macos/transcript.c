@@ -58,28 +58,14 @@ int ascolto_transcript_open(ascolto_live_app_t *app, bool manual) {
                             &app->files.storage_writer))
     return -1;
   memset(&app->files, 0, sizeof(app->files));
-  ascolto_mkdir_p(app->config.output_dir);
-  time_t now = time(NULL);
-  struct tm tm_now;
-  localtime_r(&now, &tm_now);
-  char stamp[64];
-  strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tm_now);
-  struct timeval wall_time;
-  gettimeofday(&wall_time, NULL);
-  size_t stamp_length = strlen(stamp);
-  snprintf(stamp + stamp_length, sizeof(stamp) - stamp_length, "-%06u",
-           (unsigned)wall_time.tv_usec);
-
-  snprintf(app->files.md_path, sizeof(app->files.md_path), "%s/%s_call.md",
-           app->config.output_dir, stamp);
-  snprintf(app->files.jsonl_path, sizeof(app->files.jsonl_path),
-           "%s/%s_call.jsonl", app->config.output_dir, stamp);
-  snprintf(app->files.mic_raw_path, sizeof(app->files.mic_raw_path),
-           "%s/.%s_mic.f32", app->config.output_dir, stamp);
-  snprintf(app->files.sys_raw_path, sizeof(app->files.sys_raw_path),
-           "%s/.%s_sys.f32", app->config.output_dir, stamp);
-  snprintf(app->files.m4a_path, sizeof(app->files.m4a_path), "%s/%s_call.m4a",
-           app->config.output_dir, stamp);
+  char directory[900];
+  const char *title = app->call_meta.calendar_title[0] ? app->call_meta.calendar_title : app->call_meta.window_title;
+  if (ascolto_storage_call_directory(app->config.output_dir, title, directory, sizeof(directory))) return -1;
+  snprintf(app->files.md_path, sizeof(app->files.md_path), "%s/transcript.md", directory);
+  snprintf(app->files.jsonl_path, sizeof(app->files.jsonl_path), "%s/Data/transcript.jsonl", directory);
+  snprintf(app->files.mic_raw_path, sizeof(app->files.mic_raw_path), "%s/Audio/.mic.f32", directory);
+  snprintf(app->files.sys_raw_path, sizeof(app->files.sys_raw_path), "%s/Audio/.sys.f32", directory);
+  snprintf(app->files.m4a_path, sizeof(app->files.m4a_path), "%s/Audio/recording.m4a", directory);
 
   app->files.save_audio = app->config.save_audio || app->config.cloud_recap;
   char keywords[4096];

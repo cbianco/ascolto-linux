@@ -50,7 +50,7 @@ static void scan_existing_transcripts(ascolto_core_t *core) {
         if (len > 3 && strcmp(ent->d_name + len - 3, ".md") == 0) {
             snprintf(full, sizeof(full), "%.240s/%.240s", core->config.output_dir, ent->d_name);
             add_recent_file(core, full);
-        } else if (strncmp(ent->d_name, "call_", 5) == 0) {
+        } else if (strncmp(ent->d_name, "call_", 5) == 0 || (len > 11 && ent->d_name[4] == '-' && ent->d_name[10] == '_')) {
             snprintf(full, sizeof(full), "%.240s/%.240s/transcript.md", core->config.output_dir, ent->d_name);
             if (access(full, R_OK) == 0) add_recent_file(core, full);
         }
@@ -213,28 +213,19 @@ static int start_session_unlocked(ascolto_core_t *core, ascolto_state_t target_s
         return result;
     }
 
-    ascolto_mkdir_p(core->config.output_dir);
-    time_t now = time(NULL);
-    struct tm tmv;
-    localtime_r(&now, &tmv);
-    char ts_str[64];
-    strftime(ts_str, sizeof(ts_str), "%Y-%m-%d_%H-%M-%S", &tmv);
-
     if(core->storage_writer.head && ascolto_storage_flush(core->config.config_path,&core->storage_writer)){pthread_mutex_unlock(&core->mutex);return -1;}
     memset(&core->storage_writer,0,sizeof(core->storage_writer));
     core->session_id++;
-    snprintf(core->current_session_dir, sizeof(core->current_session_dir),
-             "%.400s/call_%s_%llu", core->config.output_dir, ts_str, (unsigned long long)core->session_id);
-    ascolto_mkdir_p(core->current_session_dir);
-    snprintf(core->current_md_path, sizeof(core->current_md_path), "%.480s/transcript.md", core->current_session_dir);
-    snprintf(core->current_jsonl_path, sizeof(core->current_jsonl_path), "%.480s/transcript.jsonl", core->current_session_dir);
+    if(ascolto_storage_call_directory(core->config.output_dir,core->active_mic_app,core->current_session_dir,sizeof(core->current_session_dir)-64)){pthread_mutex_unlock(&core->mutex);return -1;}
+    snprintf(core->current_md_path, sizeof(core->current_md_path), "%.447s/transcript.md", core->current_session_dir);
+    snprintf(core->current_jsonl_path, sizeof(core->current_jsonl_path), "%.447s/Data/transcript.jsonl", core->current_session_dir);
 
     for (int ch = 0; ch < 2; ch++) {
         core->current_audio_path[ch][0] = '\0';
         core->recorder[ch] = NULL;
         if (!core->config.save_audio && !core->config.cloud_recap) continue;
         snprintf(core->current_audio_path[ch], sizeof(core->current_audio_path[ch]),
-                 "%.480s/%s.flac", core->current_session_dir, ch == ASCOLTO_CHANNEL_MIC ? "mic" : "sys");
+                 "%.447s/Audio/%s.flac", core->current_session_dir, ch == ASCOLTO_CHANNEL_MIC ? "mic" : "sys");
         core->recorder[ch] = ascolto_audio_recorder_open(core->current_audio_path[ch]);
         if (!core->recorder[ch]) core->current_audio_path[ch][0] = '\0';
     }
@@ -674,6 +665,22 @@ int ascolto_core_set_language(ascolto_core_t *core, const char *lang) {
     pthread_mutex_unlock(&core->config_mutex);
     ascolto_tray_update(&core->tray);
     return 0;
+}
+
+int ascolto_core_set_output_directory(ascolto_core_t *core, const char *path) {
+    if (!core || !path || path[0] != '/' || strlen(path) >= sizeof(core->config.output_dir) || ascolto_mkdir_p(path)) return -1;
+    pthread_mutex_lock(&core->config_mutex);
+    pthread_mutex_lock(&core->mutex);
+    ascolto_config_t candidate = core->config;
+    pthread_mutex_unlock(&core->mutex);
+    snprintf(candidate.output_dir, sizeof(candidate.output_dir), "%s", path);
+    int result = ascolto_config_save(&candidate, NULL);
+    pthread_mutex_lock(&core->mutex);
+    if (!result) snprintf(core->config.output_dir, sizeof(core->config.output_dir), "%s", path);
+    pthread_mutex_unlock(&core->mutex);
+    pthread_mutex_unlock(&core->config_mutex);
+    ascolto_tray_update(&core->tray);
+    return result;
 }
 
 static int set_capture_device(ascolto_core_t *core, ascolto_channel_t channel, const char *device) {
