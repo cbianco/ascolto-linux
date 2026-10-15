@@ -18,30 +18,6 @@ extern "C" {
 #define ASCOLTO_VOICEPRINT_DIM 16
 #define ASCOLTO_MAX_WORDS 128
 #define ASCOLTO_MAX_SPEAKERS 16
-#define ASCOLTO_MAX_SEGMENTS 256
-#define ASCOLTO_SYS_ENV_HISTORY 128
-#define ASCOLTO_RECENT_SYS_UTTS 8
-
-/* --------------------------------------------------------------------------
- * Audio Stream & Channel Types
- * -------------------------------------------------------------------------- */
-
-
-const char* ascolto_channel_name(ascolto_channel_t ch);
-
-/* --------------------------------------------------------------------------
- * WAV 16kHz Mono PCM Utilities
- * -------------------------------------------------------------------------- */
-typedef struct {
-    float* samples;
-    int num_samples;
-    int sample_rate;
-} ascolto_audio_buffer_t;
-
-int ascolto_wav_load(const char* path, ascolto_audio_buffer_t* out_buf);
-int ascolto_wav_save(const char* path, const float* samples, int num_samples, int sample_rate);
-void ascolto_audio_free(ascolto_audio_buffer_t* buf);
-float ascolto_audio_rms_db(const float* samples, int num_samples);
 
 /* --------------------------------------------------------------------------
  * Persistent Configuration (~/.config/ascolto/config.json)
@@ -91,10 +67,6 @@ int ascolto_macos_device_status(uint32_t device_id, ascolto_macos_device_info_t*
 void ascolto_diagnostics_init(const char* config_path);
 void ascolto_diagnostic(const char* format, ...) __attribute__((format(printf, 1, 2)));
 
-/* Checks if any OTHER process on macOS (excluding our own getpid()) is actively using audio input (microphone).
-   If active, writes the bundle ID (e.g. "com.google.Chrome", "com.microsoft.teams2") into out_bundle_id. */
-bool ascolto_macos_external_app_using_mic(char* out_bundle_id, size_t bundle_cap, int* out_pid);
-
 /* Queries all external processes currently using Audio Input (MIC) and Audio Output (SYS).
    Formats human-readable lists into out_in_apps and out_out_apps.
    Returns true if at least one external app is using the microphone (input). */
@@ -121,53 +93,6 @@ void ascolto_macos_query_call_metadata(
 );
 void ascolto_macos_request_accessibility_permission(void);
 void ascolto_macos_request_calendar_permission(void);
-
-typedef void (*ascolto_mic_callback_t)(bool is_active, double timestamp_s, void* userdata);
-
-typedef struct ascolto_mic_monitor_s ascolto_mic_monitor_t;
-
-struct ascolto_mic_monitor_s {
-    const char* backend_name;
-    bool (*is_active)(ascolto_mic_monitor_t* self);
-    void (*step)(ascolto_mic_monitor_t* self, double current_time_s);
-    void (*destroy)(ascolto_mic_monitor_t* self);
-    ascolto_mic_callback_t callback;
-    void* userdata;
-    void* impl;
-};
-
-ascolto_mic_monitor_t* ascolto_mic_monitor_create_simulated(
-    double active_start_s,
-    double active_end_s,
-    ascolto_mic_callback_t cb,
-    void* userdata
-);
-
-ascolto_mic_monitor_t* ascolto_mic_monitor_create_macos(
-    ascolto_mic_callback_t cb,
-    void* userdata
-);
-
-/* --------------------------------------------------------------------------
- * Voice Activity Detection (VAD) & Turn Segmentation
- * -------------------------------------------------------------------------- */
-typedef struct {
-    ascolto_channel_t channel;
-    int start_sample;
-    int end_sample;
-    double start_s;
-    double end_s;
-    float rms_db;
-} ascolto_vad_segment_t;
-
-int ascolto_vad_segment_buffer(
-    const float* samples,
-    int num_samples,
-    ascolto_channel_t channel,
-    const ascolto_vad_config_t* cfg,
-    ascolto_vad_segment_t* out_segments,
-    int max_segments
-);
 
 /* --------------------------------------------------------------------------
  * Whistle (Cactus Compute Needle C Engine) Wrapper
@@ -286,43 +211,6 @@ const char* ascolto_diarizer_identify(
 );
 
 /* --------------------------------------------------------------------------
- * Structured Trace & Full Call Session Simulator
- * -------------------------------------------------------------------------- */
-typedef struct {
-    double start_s;
-    double end_s;
-    ascolto_channel_t channel;
-    char speaker[32];
-    float speaker_similarity;
-    bool is_new_speaker;
-    float f0_hz;
-    float centroid_hz;
-    float rms_db;
-    ascolto_transcript_result_t transcript;
-} ascolto_utterance_t;
-
-typedef struct {
-    int num_utterances;
-    ascolto_utterance_t utterances[ASCOLTO_MAX_SEGMENTS];
-    int detected_sys_speakers;
-    double total_duration_s;
-    double total_transcribe_ms;
-} ascolto_session_report_t;
-
-int ascolto_run_simulated_session(
-    ascolto_whistle_t* whistle,
-    const float* mic_pcm,
-    int mic_samples,
-    const float* sys_pcm,
-    int sys_samples,
-    const char* language,
-    const char* keywords,
-    float diarizer_threshold,
-    FILE* trace_jsonl_out,
-    ascolto_session_report_t* out_report
-);
-
-/* --------------------------------------------------------------------------
  * Online Streaming VAD & Live App Controller (Menu Bar + Background Worker)
  * -------------------------------------------------------------------------- */
 typedef enum {
@@ -333,15 +221,6 @@ typedef enum {
 } ascolto_app_state_t;
 
 const char* ascolto_app_state_label(ascolto_app_state_t st);
-
-typedef struct {
-    double start_s;
-    double end_s;
-    float rms_db;
-    float f0_hz;
-    ascolto_voiceprint_t vp;
-    char text[512];
-} ascolto_recent_sys_utt_t;
 
 typedef struct ascolto_macos_capture_s ascolto_macos_capture_t;
 
@@ -366,6 +245,21 @@ typedef struct {
     int64_t mic_padding;
 } ascolto_live_snapshot_t;
 
+/* Resources owned by the transcript writer for one session. */
+typedef struct {
+    bool save_audio;
+    bool meta_written;
+    char md_path[512];
+    char jsonl_path[512];
+    char mic_raw_path[512];
+    char sys_raw_path[512];
+    char m4a_path[512];
+    FILE *md;
+    FILE *jsonl;
+    FILE *mic_raw;
+    FILE *sys_raw;
+} ascolto_transcript_files_t;
+
 /* Live Application Controller state shared between CoreAudio, Worker, and Menu Bar UI */
 typedef struct {
     pthread_mutex_t lock;
@@ -381,56 +275,33 @@ typedef struct {
     ascolto_online_vad_t vad_sys;
 
     ascolto_app_state_t state;
-    bool session_save_audio;
     bool manual_override_active;
     bool manual_stop_for_current_call;
     bool mic_hardware_active;
     bool sys_audio_permission_ok;
     float last_mic_rms_db;
     float last_sys_rms_db;
-    double last_sys_voiced_time_s;
     double last_sys_voiced_stream_s;
 
-    /* 20ms frame-level SYS envelope ring buffer & MIC bleed gate state */
-    float sys_env_db[ASCOLTO_SYS_ENV_HISTORY];
-    int64_t sys_env_frames;
-    float pending_audio[2][320];
+    ascolto_echo_filter_t echo;
+    float pending_audio[2][ASCOLTO_FRAME_SAMPLES];
     int pending_audio_count[2];
-    int mic_barge_in_streak;
-    int mic_turn_total_frames;
-    int mic_turn_sys_active_frames;
-    float mic_turn_sys_peak_db;
     int mic_bleed_frames_suppressed;
     int mic_echo_turns_suppressed;
     int64_t capture_dropped_samples;
     int64_t capture_padded_samples[2];
 
-    /* Recent SYS utterances for Stage-2 lexical & voiceprint echo verification */
-    ascolto_recent_sys_utt_t recent_sys_utts[ASCOLTO_RECENT_SYS_UTTS];
-    int recent_sys_utt_count;
-
     char active_mic_name[128];
-    char active_call_app[128];
     char active_in_apps[256];
     char active_out_apps[256];
     ascolto_call_metadata_t call_meta;
-    bool meta_written_to_md;
 
     double session_start_epoch_s;
-    double session_duration_s;
     int session_utterance_count;
-    char current_md_path[512];
-    char current_jsonl_path[512];
-    char current_mic_raw_path[512];
-    char current_sys_raw_path[512];
-    char current_m4a_path[512];
+    ascolto_transcript_files_t files;
     char last_speaker[32];
     char last_utterance_text[256];
 
-    FILE* md_file;
-    FILE* jsonl_file;
-    FILE* mic_raw_file;
-    FILE* sys_raw_file;
 } ascolto_live_app_t;
 
 int ascolto_live_app_init(ascolto_live_app_t* app, ascolto_whistle_t* whistle, const char* config_path);
@@ -475,9 +346,6 @@ bool ascolto_is_noise_hallucination(
 );
 
 bool ascolto_is_lexical_echo(const char* mic_text, const char* sys_text);
-
-/* Deterministic acoustic rooms exercising the production live pipeline. */
-int ascolto_run_room_bench(ascolto_whistle_t* whistle, const char* output_dir);
 
 /* --------------------------------------------------------------------------
  * Real-Time macOS Audio Capture Engine (AudioQueue / CoreAudio)

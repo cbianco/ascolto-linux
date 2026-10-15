@@ -192,8 +192,8 @@ static int verify_overflow_time(const char* directory) {
     ascolto_live_app_t app;
     if (init_app(&app, directory, "overflow")) return 1;
     ascolto_live_app_start_session(&app, true);
-    app.mic_raw_file = tmpfile();
-    app.sys_raw_file = tmpfile();
+    app.files.mic_raw = tmpfile();
+    app.files.sys_raw = tmpfile();
     ascolto_capture_buffer_t* buffer = ascolto_capture_buffer_create(6400);
     ascolto_vad_config_t config = ascolto_vad_default_config();
     config.min_speech_s = 0.30;
@@ -225,14 +225,14 @@ static int verify_overflow_time(const char* directory) {
                 vad.total_samples_processed == cursor && app.vad_sys.total_samples_processed == cursor &&
                 app.vad_mic.total_samples_processed == cursor && turns.count == 2 &&
                 fabs(turns.starts[1] - 3.0) < 0.021 && turns.ends[0] < turns.starts[1] &&
-                app.mic_raw_file && app.sys_raw_file &&
-                ftell(app.mic_raw_file) == cursor * (int64_t)sizeof(float) &&
-                ftell(app.sys_raw_file) == cursor * (int64_t)sizeof(float);
+                app.files.mic_raw && app.files.sys_raw &&
+                ftell(app.files.mic_raw) == cursor * (int64_t)sizeof(float) &&
+                ftell(app.files.sys_raw) == cursor * (int64_t)sizeof(float);
     float sample = 1;
-    if (app.sys_raw_file) {
-        fseek(app.sys_raw_file, 16000 * (long)sizeof(float), SEEK_SET);
-        if (fread(&sample, sizeof(sample), 1, app.sys_raw_file) != 1 || sample != 0) pass = false;
-        fseek(app.sys_raw_file, 0, SEEK_END);
+    if (app.files.sys_raw) {
+        fseek(app.files.sys_raw, 16000 * (long)sizeof(float), SEEK_SET);
+        if (fread(&sample, sizeof(sample), 1, app.files.sys_raw) != 1 || sample != 0) pass = false;
+        fseek(app.files.sys_raw, 0, SEEK_END);
     }
     printf("[%s] Overflow preserves %.2fs, raw stereo length and two separate VAD turns\n",
            pass ? "PASS" : "FAIL", (double)cursor / ASCOLTO_SAMPLE_RATE);

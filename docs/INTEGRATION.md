@@ -156,3 +156,72 @@ Run builds and relevant tests on both operating systems after an update.
 `ASCOLTO_PLATFORM=Linux` can select Linux recipes for inspection on another host;
 it does not provide a cross compiler or the Linux runtime. Preserve upstream
 paths to keep ordinary merges useful.
+
+## Complexity reduction after integration
+
+The refactor was checked against `04e9299` on 2026-10-15. Native behavior and
+algorithms are preserved; this changes module ownership and removes duplication.
+
+- macOS compiles shared objects once, tracks header/makefile dependencies, and
+  packages the bundle incrementally. WAV utilities, simulated monitoring, offline
+  processing, acoustic rooms and queue verification are excluded from the app.
+- `offline.h` holds the harness/reprocessing contracts. The native umbrella header
+  shrank from 499 to 367 lines. The unused device-running monitor API and
+  write-only controller/UI fields were removed; active-call detection still uses
+  external audio processes.
+- `audio_processing.c` owns the shared recent-turn echo history, MIC activity
+  counters and reset/matching operations. Both controllers retain their native
+  VAD settings, channel order, timestamp handling and synchronization.
+- The macOS transcript writer owns grouped file resources in `app.files`; the
+  controller owns lifecycle transitions. `live_session.c` shrank from 816 to 551
+  lines. Linux recap launching lives in `recap.c`, control commands in `control.c`,
+  and socket transport/event storage in `observability.c` (570 to 156 lines).
+- Directory creation, Linux device updates and boolean control commands share
+  small helpers. macOS menu construction reads the snapshot directly and uses a
+  common item constructor. Its UI module shrank from 737 to 650 lines.
+- No common engine or diarizer replacement was introduced: the algorithms and
+  ownership contracts differ. Legacy offline drift correction remains separate
+  from the synchronized live pipeline. These are deliberate boundaries, not
+  additional unification work required by this refactor.
+
+### Verification
+
+- macOS: 21/21 harness checks, all eight acoustic rooms, all four lifecycle/timeline
+  regressions, CLI/socket/archive regressions and menu smoke test pass.
+- Linux: all eight upstream suites and drain/concurrency/FLAC-duration regressions
+  pass in an isolated Ubuntu 24.04 x86_64 container with both Clang and GCC. The container has
+  no physical PipeWire server or GNOME display, as in the earlier integration
+  verification. Transient GCC internal compiler crashes
+  occurred under x86_64 emulation in the baseline and a refactored build. A retry
+  completed the full default-GCC suite successfully; Clang supplies the complete
+  baseline/refactor comparison.
+- Portable tests, including added history rollover/reset/interruption and MIC activity
+  accumulation/take/reset regressions, pass with AddressSanitizer and UndefinedBehaviorSanitizer.
+- The diarizer comparison retains the baseline results: macOS 5/5 fixture labels,
+  Linux 4/5. The existing Linux third-speaker mismatch is unchanged.
+- All seven mocked recap tests pass. No cloud request or real-microphone capture
+  was used for this refactor.
+- The 43 live utterances across the eight rooms match the baseline exactly for
+  text, channel, speaker identity, timestamps, similarity, F0 and RMS. All room
+  metrics and the offline simulation trace also match; variable ASR timing fields
+  are excluded from trace comparisons.
+- A fresh macOS object build passes without warnings. Header dependency rebuilding,
+  an unchanged build/bundle, app symbol exclusion and bundle signature were checked.
+
+### Performance comparison
+
+The same Apple Silicon host, model and eight-room workload were used for four
+runs per revision, alternating execution order. Values below are medians; they
+are synthetic pipeline measurements rather than a real-call accuracy benchmark.
+
+| Metric | Baseline | Refactored |
+| --- | --- | --- |
+| Wall time | 2.892 s | 2.900 s |
+| Process CPU time | 7.495 s | 7.500 s |
+| Peak resident memory | 86.14 MiB | 84.56 MiB |
+
+The elapsed/CPU differences are below 0.3%/0.1%, respectively. No processing
+regression was observed at this measurement precision. An unchanged native
+build/bundle takes about 0.036 s and runs no compiler or packaging commands.
+There are 183 fewer source/header/script/test lines overall, including the new
+regression; the main reduction is in duplicated state and mixed responsibilities.

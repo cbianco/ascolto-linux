@@ -1,5 +1,5 @@
 #include "ascolto.h"
-#include "ascolto/json.h"
+#include "macos/transcript.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -25,26 +25,6 @@ static double now_monotonic_s(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
-static void ensure_dir_recursive(const char* dir_path) {
-    if (!dir_path || !dir_path[0]) return;
-    char tmp[512];
-    snprintf(tmp, sizeof(tmp), "%s", dir_path);
-    for (char* p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            mkdir(tmp, 0755);
-            *p = '/';
-        }
-    }
-    mkdir(tmp, 0755);
-}
-
-/* --------------------------------------------------------------------------
- * Online Streaming VAD
- * -------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------
- * Live Application Controller
- * -------------------------------------------------------------------------- */
 static void format_mm_ss(double seconds, char* out, size_t cap) {
     if (seconds < 0.0) seconds = 0.0;
     int total = (int)seconds;
@@ -67,7 +47,7 @@ static void publish_snapshot_unlocked(ascolto_live_app_t* app) {
     snapshot->call_meta = app->call_meta;
     memcpy(snapshot->last_speaker, app->last_speaker, sizeof(snapshot->last_speaker));
     memcpy(snapshot->last_utterance_text, app->last_utterance_text, sizeof(snapshot->last_utterance_text));
-    memcpy(snapshot->current_md_path, app->current_md_path, sizeof(snapshot->current_md_path));
+    memcpy(snapshot->current_md_path, app->files.md_path, sizeof(snapshot->current_md_path));
     snapshot->utterances = app->session_utterance_count;
     snapshot->remote_speakers = app->diarizer.num_speakers;
     snapshot->session_start_s = app->session_start_epoch_s;
@@ -107,15 +87,8 @@ static void on_live_vad_turn(
     ascolto_live_app_t* app = (ascolto_live_app_t*)userdata;
     if (!app || !app->whistle || !app->whistle->loaded) return;
 
-    /* Copy & reset MIC turn co-activity stats before continuing */
-    int mic_total_fr = app->mic_turn_total_frames;
-    int mic_sys_fr = app->mic_turn_sys_active_frames;
-    float mic_sys_peak = app->mic_turn_sys_peak_db;
-    if (channel == ASCOLTO_CHANNEL_MIC) {
-        app->mic_turn_total_frames = 0;
-        app->mic_turn_sys_active_frames = 0;
-        app->mic_turn_sys_peak_db = -100.0f;
-    }
+    ascolto_mic_activity_t activity = app->echo.mic;
+    if (channel == ASCOLTO_CHANNEL_MIC) activity = ascolto_mic_activity_take(&app->echo.mic);
 
     char kw_buf[2048];
     ascolto_config_load_keywords(&app->config, kw_buf, sizeof(kw_buf));
@@ -149,7 +122,7 @@ static void on_live_vad_turn(
         ? (sys_stream_s - app->last_sys_voiced_stream_s)
         : 999.0;
     if (dt_sys_stream < 0.0) dt_sys_stream = 0.0;
-    bool recent_sys = (dt_sys_stream < 2.2) || (mic_sys_fr > 0) || app->vad_sys.in_speech;
+    bool recent_sys = (dt_sys_stream < 2.2) || (activity.sys_frames > 0) || app->vad_sys.in_speech;
 
     if (ascolto_is_noise_hallucination(&tr, channel, rms_db, recent_sys)) {
         return;
@@ -163,37 +136,13 @@ static void on_live_vad_turn(
     ascolto_extract_voiceprint(pcm, num_samples, emb, n_frames, &vp);
     free(emb);
 
-    /* Stage 2: Turn-Level Speaker Bleed / Echo Verification for MIC ("ME") turns */
     if (channel == ASCOLTO_CHANNEL_MIC) {
-        float sys_overlap_ratio = (mic_total_fr > 0) ? ((float)mic_sys_fr / (float)mic_total_fr) : 0.0f;
-
-        /* Accepted above-margin frames identify a local interruption; do not discard it
-           based on its average RMS, similar pitch, or a shared word such as "OK". */
-        bool local_interruption = mic_sys_fr >= 3 && rms_db >= mic_sys_peak + 1.0f;
-
-        /* 2b. Check against recent SYS utterances for lexical echo */
-        int n_rec = (app->recent_sys_utt_count < ASCOLTO_RECENT_SYS_UTTS)
-            ? app->recent_sys_utt_count
-            : ASCOLTO_RECENT_SYS_UTTS;
-        for (int i = 0; i < n_rec; i++) {
-            const ascolto_recent_sys_utt_t* su = &app->recent_sys_utts[i];
-            if (ascolto_echo_turn_matches(tr.text, start_s, end_s, rms_db, sys_overlap_ratio,
-                local_interruption, su->text, su->start_s, su->end_s, su->rms_db)) {
-                app->mic_echo_turns_suppressed++;
-                return;
-            }
-
+        if (ascolto_echo_filter_matches(&app->echo, tr.text, start_s, end_s, rms_db, &activity)) {
+            app->mic_echo_turns_suppressed++;
+            return;
         }
     } else {
-        /* Record SYS utterance into rolling history for Stage-2 echo comparison */
-        ascolto_recent_sys_utt_t* slot = &app->recent_sys_utts[app->recent_sys_utt_count % ASCOLTO_RECENT_SYS_UTTS];
-        slot->start_s = start_s;
-        slot->end_s = end_s;
-        slot->rms_db = rms_db;
-        slot->f0_hz = vp.f0_mean_hz;
-        slot->vp = vp;
-        snprintf(slot->text, sizeof(slot->text), "%s", tr.text);
-        app->recent_sys_utt_count++;
+        ascolto_echo_filter_remember(&app->echo, tr.text, start_s, end_s, rms_db);
     }
 
     float sim = 1.0f;
@@ -204,66 +153,7 @@ static void on_live_vad_turn(
     snprintf(app->last_speaker, sizeof(app->last_speaker), "%s", speaker);
     snprintf(app->last_utterance_text, sizeof(app->last_utterance_text), "%s", tr.text);
 
-    char t_start[16], t_end[16];
-    format_mm_ss(start_s, t_start, sizeof(t_start));
-    format_mm_ss(end_s, t_end, sizeof(t_end));
-
-    const char* src_app = (channel == ASCOLTO_CHANNEL_MIC)
-        ? (app->active_in_apps[0] ? app->active_in_apps : app->active_mic_name)
-        : (app->active_out_apps[0] ? app->active_out_apps : "Sistema");
-
-    if (!app->meta_written_to_md &&
-        (app->call_meta.window_title[0] != '\0' || app->call_meta.calendar_title[0] != '\0')) {
-        if (app->md_file) {
-            if (app->call_meta.window_title[0]) {
-                fprintf(app->md_file, "> 📋 **Titolo Finestra Call**: %s\n", app->call_meta.window_title);
-            }
-            if (app->call_meta.calendar_title[0]) {
-                fprintf(app->md_file, "> 📅 **Riunione a Calendario**: %s\n", app->call_meta.calendar_title);
-            }
-            if (app->call_meta.calendar_attendees[0]) {
-                fprintf(app->md_file, "> 👥 **Partecipanti**: %s\n", app->call_meta.calendar_attendees);
-            }
-            fprintf(app->md_file, "\n");
-            fflush(app->md_file);
-        }
-        if (app->jsonl_file) {
-            fprintf(app->jsonl_file,
-                    "{\"event\":\"call_metadata\",\"window_title\":\"%s\",\"calendar_title\":\"%s\",\"attendees\":\"%s\"}\n",
-                    app->call_meta.window_title,
-                    app->call_meta.calendar_title,
-                    app->call_meta.calendar_attendees);
-            fflush(app->jsonl_file);
-        }
-        app->meta_written_to_md = true;
-    }
-
-    if (app->md_file) {
-        fprintf(app->md_file, "- **[%s - %s] %s** *(canale %s · app: %s, lingua: %s)*: %s\n",
-                t_start, t_end, speaker, ascolto_channel_name(channel), src_app, tr.language, tr.text);
-        fflush(app->md_file);
-    }
-
-    if (app->jsonl_file) {
-        fprintf(app->jsonl_file,
-                "{\"event\":\"utterance\",\"channel\":\"%s\",\"source_app\":\"%s\",\"speaker\":\"%s\","
-                "\"is_new_speaker\":%s,\"similarity\":%.3f,\"start_s\":%.2f,\"end_s\":%.2f,"
-                "\"f0_hz\":%.1f,\"rms_db\":%.1f,\"language\":\"%s\",\"ttft_ms\":%.1f,\"text\":",
-                ascolto_channel_name(channel),
-                src_app,
-                speaker,
-                is_new ? "true" : "false",
-                sim,
-                start_s,
-                end_s,
-                vp.f0_mean_hz,
-                rms_db,
-                tr.language,
-                tr.ttft_ms);
-        ascolto_write_json_string(app->jsonl_file, tr.text);
-        fprintf(app->jsonl_file, "}\n");
-        fflush(app->jsonl_file);
-    }
+    ascolto_transcript_write_turn(app, channel, start_s, end_s, rms_db, &vp, &tr, speaker, sim, is_new);
 }
 
 int ascolto_live_app_init(ascolto_live_app_t* app, ascolto_whistle_t* whistle, const char* config_path) {
@@ -301,24 +191,14 @@ int ascolto_live_app_init(ascolto_live_app_t* app, ascolto_whistle_t* whistle, c
     app->sys_audio_permission_ok = false;
     app->last_mic_rms_db = -100.0f;
     app->last_sys_rms_db = -100.0f;
-    app->last_sys_voiced_time_s = -10.0;
     app->last_sys_voiced_stream_s = -10.0;
-    for (int i = 0; i < ASCOLTO_SYS_ENV_HISTORY; i++) {
-        app->sys_env_db[i] = -100.0f;
-    }
-    app->sys_env_frames = 0;
+    ascolto_echo_filter_reset(&app->echo);
     memset(app->pending_audio_count, 0, sizeof(app->pending_audio_count));
-    app->mic_barge_in_streak = 0;
-    app->mic_turn_total_frames = 0;
-    app->mic_turn_sys_active_frames = 0;
-    app->mic_turn_sys_peak_db = -100.0f;
     app->mic_bleed_frames_suppressed = 0;
     app->mic_echo_turns_suppressed = 0;
-    app->recent_sys_utt_count = 0;
     app->capture_dropped_samples = 0;
     memset(app->capture_padded_samples, 0, sizeof(app->capture_padded_samples));
     snprintf(app->active_mic_name, sizeof(app->active_mic_name), "Predefinito di sistema");
-    snprintf(app->active_call_app, sizeof(app->active_call_app), "Nessuna call attiva");
     snprintf(app->active_in_apps, sizeof(app->active_in_apps), "Nessuna");
     snprintf(app->active_out_apps, sizeof(app->active_out_apps), "Nessuna");
     snprintf(app->last_utterance_text, sizeof(app->last_utterance_text), "Nessuna trascrizione recente");
@@ -331,9 +211,6 @@ int ascolto_live_app_init(ascolto_live_app_t* app, ascolto_whistle_t* whistle, c
         app->active_in_apps, sizeof(app->active_in_apps),
         app->active_out_apps, sizeof(app->active_out_apps)
     );
-    if (app->active_in_apps[0]) {
-        snprintf(app->active_call_app, sizeof(app->active_call_app), "%s", app->active_in_apps);
-    }
 
     publish_snapshot_unlocked(app);
     return 0;
@@ -343,105 +220,23 @@ static int start_session_unlocked(ascolto_live_app_t* app, bool is_manual) {
     if (app->state == ASCOLTO_STATE_RECORDING) return 0;
     if (app->state == ASCOLTO_STATE_STOPPING) return -2;
 
-    ensure_dir_recursive(app->config.output_dir);
-
-    time_t now = time(NULL);
-    struct tm tm_now;
-    localtime_r(&now, &tm_now);
-    char stamp[64];
-    strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tm_now);
-    struct timeval wall_time;
-    gettimeofday(&wall_time, NULL);
-    size_t stamp_length = strlen(stamp);
-    snprintf(stamp + stamp_length, sizeof(stamp) - stamp_length, "-%06u", (unsigned)wall_time.tv_usec);
-
-    snprintf(app->current_md_path, sizeof(app->current_md_path),
-             "%s/%s_call.md", app->config.output_dir, stamp);
-    snprintf(app->current_jsonl_path, sizeof(app->current_jsonl_path),
-             "%s/%s_call.jsonl", app->config.output_dir, stamp);
-    snprintf(app->current_mic_raw_path, sizeof(app->current_mic_raw_path),
-             "%s/.%s_mic.f32", app->config.output_dir, stamp);
-    snprintf(app->current_sys_raw_path, sizeof(app->current_sys_raw_path),
-             "%s/.%s_sys.f32", app->config.output_dir, stamp);
-    snprintf(app->current_m4a_path, sizeof(app->current_m4a_path),
-             "%s/%s_call.m4a", app->config.output_dir, stamp);
-
-    app->md_file = fopen(app->current_md_path, "w");
-    app->jsonl_file = fopen(app->current_jsonl_path, "w");
-    app->session_save_audio = app->config.save_audio || app->config.cloud_recap;
-    if (app->session_save_audio) {
-        app->mic_raw_file = fopen(app->current_mic_raw_path, "wb");
-        app->sys_raw_file = fopen(app->current_sys_raw_path, "wb");
-    }
-
-    /* Use the metadata cached by the monitor. AX/EventKit queries can block and must
-       never run while holding the session lock used by the menu and audio worker. */
-
-    if (app->md_file) {
-        char human_date[64];
-        strftime(human_date, sizeof(human_date), "%Y-%m-%d %H:%M:%S", &tm_now);
-        fprintf(app->md_file, "# Trascrizione Call — %s\n\n", human_date);
-        if (app->call_meta.window_title[0]) {
-            fprintf(app->md_file, "- **Titolo Finestra Call**: %s\n", app->call_meta.window_title);
-        }
-        if (app->call_meta.calendar_title[0]) {
-            fprintf(app->md_file, "- **Riunione a Calendario**: %s\n", app->call_meta.calendar_title);
-        }
-        if (app->call_meta.calendar_organizer[0]) {
-            fprintf(app->md_file, "- **Organizzatore**: %s\n", app->call_meta.calendar_organizer);
-        }
-        if (app->call_meta.calendar_attendees[0]) {
-            fprintf(app->md_file, "- **Partecipanti invitati**: %s\n", app->call_meta.calendar_attendees);
-        }
-        if (app->call_meta.calendar_notes[0]) {
-            fprintf(app->md_file, "- **Descrizione / Agenda**: %s\n", app->call_meta.calendar_notes);
-        }
-        fprintf(app->md_file, "- **Microfono (`ME`)**: %s\n", app->active_mic_name);
-        fprintf(app->md_file, "- **App Input (`MIC`)**: %s\n", app->active_in_apps[0] ? app->active_in_apps : "Manuale");
-        fprintf(app->md_file, "- **App Output (`SYS`)**: %s\n", app->active_out_apps[0] ? app->active_out_apps : "Sistema");
-        fprintf(app->md_file, "- **Lingua impostata**: `%s`\n\n---\n\n", app->config.language);
-        fflush(app->md_file);
-        app->meta_written_to_md = (app->call_meta.window_title[0] != '\0' || app->call_meta.calendar_title[0] != '\0');
-    }
-    if (app->jsonl_file) {
-        fprintf(app->jsonl_file,
-                "{\"event\":\"session_start\",\"manual\":%s,\"mic\":\"%s\",\"in_app\":\"%s\",\"out_app\":\"%s\","
-                "\"window_title\":\"%s\",\"calendar_title\":\"%s\",\"attendees\":\"%s\"}\n",
-                is_manual ? "true" : "false",
-                app->active_mic_name,
-                app->active_in_apps,
-                app->active_out_apps,
-                app->call_meta.window_title,
-                app->call_meta.calendar_title,
-                app->call_meta.calendar_attendees);
-        fflush(app->jsonl_file);
-    }
+    ascolto_transcript_open(app, is_manual);
 
     ascolto_diarizer_init(&app->diarizer, app->config.diarizer_threshold);
     ascolto_online_vad_reset(&app->vad_mic);
     ascolto_online_vad_reset(&app->vad_sys);
 
-    for (int i = 0; i < ASCOLTO_SYS_ENV_HISTORY; i++) {
-        app->sys_env_db[i] = -100.0f;
-    }
-    app->sys_env_frames = 0;
+    ascolto_echo_filter_reset(&app->echo);
     memset(app->pending_audio_count, 0, sizeof(app->pending_audio_count));
     app->last_sys_rms_db = -100.0f;
-    app->last_sys_voiced_time_s = -10.0;
     app->last_sys_voiced_stream_s = -10.0;
-    app->mic_barge_in_streak = 0;
-    app->mic_turn_total_frames = 0;
-    app->mic_turn_sys_active_frames = 0;
-    app->mic_turn_sys_peak_db = -100.0f;
     app->mic_bleed_frames_suppressed = 0;
     app->mic_echo_turns_suppressed = 0;
-    app->recent_sys_utt_count = 0;
     app->capture_dropped_samples = 0;
     memset(app->capture_padded_samples, 0, sizeof(app->capture_padded_samples));
 
     app->session_generation++;
     app->session_start_epoch_s = now_monotonic_s();
-    app->session_duration_s = 0.0;
     app->session_utterance_count = 0;
     app->manual_override_active = is_manual;
     app->state = ASCOLTO_STATE_RECORDING;
@@ -466,52 +261,8 @@ static int stop_session_unlocked(ascolto_live_app_t* app) {
     double elapsed = now_monotonic_s() - app->session_start_epoch_s;
     double stream_dur_s = (double)app->vad_mic.total_samples_processed / (double)ASCOLTO_SAMPLE_RATE;
     if (stream_dur_s > elapsed) elapsed = stream_dur_s;
-    app->session_duration_s = elapsed;
 
-    if (app->md_file) {
-        char dur[16];
-        format_mm_ss(elapsed, dur, sizeof(dur));
-        fprintf(app->md_file, "\n---\n*Fine chiamata (durata: %s, frasi: %d, interlocutori remoti: %d)*\n",
-                dur, app->session_utterance_count, app->diarizer.num_speakers);
-        fclose(app->md_file);
-        app->md_file = NULL;
-    }
-    if (app->jsonl_file) {
-        fprintf(app->jsonl_file,
-                "{\"event\":\"session_end\",\"duration_s\":%.2f,\"utterances\":%d,\"remote_speakers\":%d,\"audio_m4a\":\"%s\",\"bleed_frames\":%d,\"echo_turns\":%d,\"capture_dropped_samples\":%lld,\"padded_mic_samples\":%lld,\"padded_sys_samples\":%lld}\n",
-                elapsed, app->session_utterance_count, app->diarizer.num_speakers,
-                app->session_save_audio ? app->current_m4a_path : "",
-                app->mic_bleed_frames_suppressed, app->mic_echo_turns_suppressed,
-                (long long)app->capture_dropped_samples,
-                (long long)app->capture_padded_samples[0], (long long)app->capture_padded_samples[1]);
-        fclose(app->jsonl_file);
-        app->jsonl_file = NULL;
-    }
-
-    if (app->mic_raw_file) {
-        fclose(app->mic_raw_file);
-        app->mic_raw_file = NULL;
-    }
-    if (app->sys_raw_file) {
-        fclose(app->sys_raw_file);
-        app->sys_raw_file = NULL;
-    }
-
-    /* If a brief (< 3.0s) transient session produced 0 utterances, remove the empty stub files */
-    if (app->session_utterance_count == 0 && elapsed < 3.0) {
-        if (app->current_md_path[0]) unlink(app->current_md_path);
-        if (app->current_jsonl_path[0]) unlink(app->current_jsonl_path);
-        if (app->current_mic_raw_path[0]) unlink(app->current_mic_raw_path);
-        if (app->current_sys_raw_path[0]) unlink(app->current_sys_raw_path);
-        app->manual_override_active = false;
-        app->state = app->config.paused ? ASCOLTO_STATE_PAUSED : ASCOLTO_STATE_IDLE;
-        return 0;
-    }
-
-    if (app->session_save_audio && app->current_mic_raw_path[0] && app->current_sys_raw_path[0]) {
-        ascolto_archive_finalize(&app->config, app->current_mic_raw_path, app->current_sys_raw_path,
-                                app->current_m4a_path, app->current_md_path);
-    }
+    ascolto_transcript_close(app, elapsed);
 
     app->manual_override_active = false;
     app->state = app->config.paused ? ASCOLTO_STATE_PAUSED : ASCOLTO_STATE_IDLE;
@@ -594,6 +345,12 @@ void ascolto_live_app_on_mic_hardware_change(ascolto_live_app_t* app, bool mic_a
     pthread_mutex_unlock(&app->lock);
 }
 
+/* Called with app->lock held after a preference mutation. */
+static void save_preferences_unlocked(ascolto_live_app_t *app) {
+    ascolto_config_save(&app->config, NULL);
+    publish_snapshot_unlocked(app);
+}
+
 void ascolto_live_app_set_paused(ascolto_live_app_t* app, bool paused) {
     if (!app) return;
     pthread_mutex_lock(&app->lock);
@@ -608,8 +365,7 @@ void ascolto_live_app_set_paused(ascolto_live_app_t* app, bool paused) {
     } else if (paused && app->state == ASCOLTO_STATE_IDLE) {
         app->state = ASCOLTO_STATE_PAUSED;
     }
-    ascolto_config_save(&app->config, NULL);
-    publish_snapshot_unlocked(app);
+    save_preferences_unlocked(app);
     pthread_mutex_unlock(&app->lock);
 }
 
@@ -629,8 +385,7 @@ void ascolto_live_app_set_language(ascolto_live_app_t* app, const char* lang) {
     if (!app || !lang) return;
     pthread_mutex_lock(&app->lock);
     snprintf(app->config.language, sizeof(app->config.language), "%s", lang);
-    ascolto_config_save(&app->config, NULL);
-    publish_snapshot_unlocked(app);
+    save_preferences_unlocked(app);
     pthread_mutex_unlock(&app->lock);
 }
 
@@ -639,8 +394,7 @@ void ascolto_live_app_set_devices(ascolto_live_app_t* app, uint32_t mic_dev_id, 
     pthread_mutex_lock(&app->lock);
     app->config.mic_device_id = mic_dev_id;
     app->config.sys_device_id = sys_dev_id;
-    ascolto_config_save(&app->config, NULL);
-    publish_snapshot_unlocked(app);
+    save_preferences_unlocked(app);
     pthread_mutex_unlock(&app->lock);
 }
 
@@ -649,8 +403,7 @@ void ascolto_live_app_set_diarizer_threshold(ascolto_live_app_t* app, float thre
     pthread_mutex_lock(&app->lock);
     app->config.diarizer_threshold = threshold;
     app->diarizer.similarity_threshold = threshold;
-    ascolto_config_save(&app->config, NULL);
-    publish_snapshot_unlocked(app);
+    save_preferences_unlocked(app);
     pthread_mutex_unlock(&app->lock);
 }
 
@@ -658,8 +411,7 @@ void ascolto_live_app_set_save_audio(ascolto_live_app_t* app, bool enabled) {
     if (!app) return;
     pthread_mutex_lock(&app->lock);
     app->config.save_audio = enabled;
-    ascolto_config_save(&app->config, NULL);
-    publish_snapshot_unlocked(app);
+    save_preferences_unlocked(app);
     pthread_mutex_unlock(&app->lock);
 }
 
@@ -667,8 +419,7 @@ void ascolto_live_app_set_cloud_recap(ascolto_live_app_t* app, bool enabled) {
     if (!app) return;
     pthread_mutex_lock(&app->lock);
     app->config.cloud_recap = enabled;
-    ascolto_config_save(&app->config, NULL);
-    publish_snapshot_unlocked(app);
+    save_preferences_unlocked(app);
     pthread_mutex_unlock(&app->lock);
 }
 
@@ -676,8 +427,7 @@ void ascolto_live_app_set_recap_tts(ascolto_live_app_t* app, bool enabled) {
     if (!app) return;
     pthread_mutex_lock(&app->lock);
     app->config.recap_tts = enabled;
-    ascolto_config_save(&app->config, NULL);
-    publish_snapshot_unlocked(app);
+    save_preferences_unlocked(app);
     pthread_mutex_unlock(&app->lock);
 }
 
@@ -689,19 +439,18 @@ static void process_audio_unlocked(
 ) {
     if (!app || !samples || num_samples <= 0) return;
     if (app->state == ASCOLTO_STATE_RECORDING || app->state == ASCOLTO_STATE_STOPPING) {
-        double now_s = now_monotonic_s();
         float chunk_db = ascolto_audio_rms_db(samples, num_samples);
         const int frame_len = ASCOLTO_SAMPLE_RATE / 50; /* 20 ms = 320 samples */
 
         if (channel == ASCOLTO_CHANNEL_SYS) {
-            if (app->sys_raw_file) {
-                fwrite(samples, sizeof(float), (size_t)num_samples, app->sys_raw_file);
+            if (app->files.sys_raw) {
+                fwrite(samples, sizeof(float), (size_t)num_samples, app->files.sys_raw);
             }
             for (int idx = 0; idx < num_samples; idx += frame_len) {
                 int step = (idx + frame_len <= num_samples) ? frame_len : (num_samples - idx);
                 float f_db = ascolto_audio_rms_db(samples + idx, step);
-                app->sys_env_db[app->sys_env_frames % ASCOLTO_SYS_ENV_HISTORY] = f_db;
-                app->sys_env_frames++;
+                app->echo.sys_db[app->echo.sys_frames % ASCOLTO_SYS_ENV_HISTORY] = f_db;
+                app->echo.sys_frames++;
 
                 if (f_db >= -36.5f) {
                     double sys_t = (double)(app->vad_sys.total_samples_processed + idx + step) /
@@ -712,13 +461,12 @@ static void process_audio_unlocked(
                         app->last_sys_rms_db = 0.92f * app->last_sys_rms_db + 0.08f * f_db;
                     }
                     app->last_sys_voiced_stream_s = sys_t;
-                    app->last_sys_voiced_time_s = now_s;
                 }
             }
             ascolto_online_vad_feed(&app->vad_sys, samples, num_samples, on_live_vad_turn, app);
         } else {
-            if (app->mic_raw_file) {
-                fwrite(samples, sizeof(float), (size_t)num_samples, app->mic_raw_file);
+            if (app->files.mic_raw) {
+                fwrite(samples, sizeof(float), (size_t)num_samples, app->files.mic_raw);
             }
             app->last_mic_rms_db = chunk_db;
 
@@ -730,10 +478,9 @@ static void process_audio_unlocked(
                 /* Address SYS history by stream sample position, independent of callback sizes.
                    Only suppress MIC within 240ms of SYS speech and below SYS + 3.5 dB. */
                 float ref_sys_db;
-                bool sys_active_window = ascolto_bleed_reference(app->sys_env_db, app->sys_env_frames,
+                bool sys_active_window = ascolto_bleed_reference(app->echo.sys_db, app->echo.sys_frames,
                     app->vad_mic.total_samples_processed + step, app->vad_sys.total_samples_processed, &ref_sys_db);
                 bool is_bleed = sys_active_window && f_db < ref_sys_db + 3.5f;
-                app->mic_barge_in_streak = (!is_bleed && sys_active_window) ? app->mic_barge_in_streak + 1 : 0;
 
                 if (is_bleed) {
                     float zeros[320] = {0};
@@ -743,23 +490,11 @@ static void process_audio_unlocked(
                     }
                 } else {
                     ascolto_online_vad_feed(&app->vad_mic, samples + idx, step, on_live_vad_turn, app);
-                    if (app->vad_mic.in_speech) {
-                        app->mic_turn_total_frames++;
-                        if (sys_active_window) {
-                            app->mic_turn_sys_active_frames++;
-                            if (ref_sys_db > app->mic_turn_sys_peak_db) {
-                                app->mic_turn_sys_peak_db = ref_sys_db;
-                            }
-                        }
-                    } else {
-                        app->mic_turn_total_frames = 0;
-                        app->mic_turn_sys_active_frames = 0;
-                        app->mic_turn_sys_peak_db = -100.0f;
-                    }
+                    ascolto_mic_activity_track(&app->echo.mic, app->vad_mic.in_speech,
+                                               sys_active_window, ref_sys_db);
                 }
             }
         }
-        app->session_duration_s = now_s - app->session_start_epoch_s;
     }
 }
 

@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "ascolto/filesystem.h"
 #include "ascolto/types.h"
 #include <errno.h>
 #include <stdio.h>
@@ -20,7 +21,7 @@ const char *ascolto_state_to_string(ascolto_state_t state) {
 }
 
 const char *ascolto_channel_to_string(ascolto_channel_t channel) {
-    return (channel == ASCOLTO_CHANNEL_MIC) ? "MIC" : "SYS";
+    return ascolto_channel_name(channel);
 }
 
 const char *ascolto_sensitivity_to_string(ascolto_sensitivity_t sens) {
@@ -53,24 +54,6 @@ float ascolto_sensitivity_threshold(ascolto_sensitivity_t sens, float custom_ove
         case ASCOLTO_SENSITIVITY_HIGH:   return 0.93f; /* Sensitive to subtle voice differences */
         default:                         return 0.85f;
     }
-}
-
-static int mkdir_p(const char *dir_path) {
-    if (!dir_path || !*dir_path) return -1;
-    char tmp[512];
-    snprintf(tmp, sizeof(tmp), "%s", dir_path);
-    size_t len = strlen(tmp);
-    if (len == 0) return -1;
-    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
-    return 0;
 }
 
 void ascolto_config_init_defaults(ascolto_config_t *cfg) {
@@ -175,14 +158,8 @@ int ascolto_config_load(ascolto_config_t *cfg, const char *path) {
 int ascolto_config_save(const ascolto_config_t *cfg, const char *path) {
     if (!cfg) return -1;
     const char *target = (path && *path) ? path : cfg->config_path;
-    char dir_buf[512];
-    snprintf(dir_buf, sizeof(dir_buf), "%s", target);
-    char *slash = strrchr(dir_buf, '/');
-    if (slash) {
-        *slash = '\0';
-        mkdir_p(dir_buf);
-    }
-    mkdir_p(cfg->output_dir);
+    ascolto_mkdir_parent(target);
+    ascolto_mkdir_p(cfg->output_dir);
 
     FILE *fp = fopen(target, "w");
     if (!fp) return -1;

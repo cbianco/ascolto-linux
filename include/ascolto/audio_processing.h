@@ -26,7 +26,6 @@ typedef struct {
     int capacity;
     int write_pos;
     bool in_speech;
-    int speech_start_sample;
     int last_voiced_sample;
     int64_t total_samples_processed;
 } ascolto_online_vad_t;
@@ -61,6 +60,37 @@ void ascolto_online_vad_flush(
     void* userdata
 );
 
+
+/* Shared per-session echo state; each caller serializes access with audio processing. */
+typedef struct {
+    int frames;
+    int sys_frames;
+    float sys_peak_db;
+} ascolto_mic_activity_t;
+
+typedef struct {
+    double start_s, end_s;
+    float rms_db;
+    char text[512];
+} ascolto_echo_turn_t;
+
+#define ASCOLTO_RECENT_SYS_TURNS 8
+typedef struct {
+    float sys_db[ASCOLTO_SYS_ENV_HISTORY];
+    int64_t sys_frames;
+    ascolto_mic_activity_t mic;
+    ascolto_echo_turn_t turns[ASCOLTO_RECENT_SYS_TURNS];
+    unsigned turn_count;
+} ascolto_echo_filter_t;
+
+void ascolto_echo_filter_reset(ascolto_echo_filter_t *filter);
+void ascolto_mic_activity_track(ascolto_mic_activity_t *activity, bool in_speech,
+                                bool sys_active, float sys_db);
+ascolto_mic_activity_t ascolto_mic_activity_take(ascolto_mic_activity_t *activity);
+void ascolto_echo_filter_remember(ascolto_echo_filter_t *filter, const char *text,
+                                  double start, double end, float rms_db);
+bool ascolto_echo_filter_matches(const ascolto_echo_filter_t *filter, const char *text,
+    double start, double end, float rms_db, const ascolto_mic_activity_t *activity);
 
 /* Reference only recent SYS speech on the same sample timeline. */
 bool ascolto_bleed_reference(const float *history, int64_t frames, int64_t mic_end,

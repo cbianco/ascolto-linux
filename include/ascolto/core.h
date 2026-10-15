@@ -16,12 +16,6 @@
 extern "C" {
 #endif
 
-typedef struct {
-    double start, end;
-    float rms_db;
-    char text[512];
-} ascolto_echo_turn_t;
-
 struct ascolto_core {
     ascolto_config_t config;
     ascolto_state_t state;
@@ -54,13 +48,8 @@ struct ascolto_core {
 
     ascolto_online_vad_t vad[2];
     char vad_hint[2][512];
-    float sys_env_db[ASCOLTO_SYS_ENV_HISTORY];
-    int64_t sys_env_frames;
+    ascolto_echo_filter_t echo;
     int64_t last_sys_voiced_sample;
-    int mic_turn_frames, mic_sys_frames;
-    float mic_sys_peak;
-    ascolto_echo_turn_t recent_sys[8];
-    unsigned recent_sys_count;
 
     ascolto_whistle_engine_t whistle;
     ascolto_diarizer_t diarizer;

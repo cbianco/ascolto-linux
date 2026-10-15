@@ -492,10 +492,8 @@ static void* capture_monitor_thread_fn(void* arg) {
             app->call_meta = meta;
             if (in_apps[0]) {
                 snprintf(app->active_in_apps, sizeof(app->active_in_apps), "%s", in_apps);
-                snprintf(app->active_call_app, sizeof(app->active_call_app), "%s", in_apps);
             } else {
                 snprintf(app->active_in_apps, sizeof(app->active_in_apps), "Nessuna");
-                snprintf(app->active_call_app, sizeof(app->active_call_app), "Nessuna call rilevata");
             }
             if (out_apps[0]) {
                 snprintf(app->active_out_apps, sizeof(app->active_out_apps), "%s", out_apps);

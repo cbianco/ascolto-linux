@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "ascolto/filesystem.h"
 #include "ascolto/tray_ui.h"
 #include "ascolto/core.h"
 #include <dlfcn.h>
@@ -79,27 +80,10 @@ typedef struct {
     volatile bool keywords_dialog_open;
 } gtk_tray_priv_t;
 
-static void ensure_dir_exists(const char *dir_path) {
-    if (!dir_path || !*dir_path) return;
-    char tmp[512];
-    snprintf(tmp, sizeof(tmp), "%s", dir_path);
-    size_t len = strlen(tmp);
-    if (len == 0) return;
-    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            mkdir(tmp, 0755);
-            *p = '/';
-        }
-    }
-    mkdir(tmp, 0755);
-}
-
 static void launch_path_nonblocking(const char *path, bool is_dir) {
     if (!path || !*path) return;
     if (is_dir) {
-        ensure_dir_exists(path);
+        ascolto_mkdir_p(path);
     }
     gchar *uri = g_filename_to_uri(path, NULL, NULL);
     if (!uri) return;

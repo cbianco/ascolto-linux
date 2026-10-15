@@ -23,13 +23,6 @@
 @property (nonatomic, assign) int smokeMainThreadTicks;
 @property (nonatomic, assign) BOOL captureSmokeFailed;
 
-/* Dynamic status menu items */
-@property (nonatomic, strong) NSMenuItem* stateHeaderItem;
-@property (nonatomic, strong) NSMenuItem* micHeaderItem;
-@property (nonatomic, strong) NSMenuItem* previewHeaderItem;
-@property (nonatomic, strong) NSMenuItem* toggleRecordItem;
-@property (nonatomic, strong) NSMenuItem* autoTriggerItem;
-@property (nonatomic, strong) NSMenuItem* pauseItem;
 @end
 
 @implementation AscoltoMenuController
@@ -119,110 +112,82 @@
     if (CFAbsoluteTimeGetCurrent() - _lastDeviceRefresh >= 2.0) [self refreshDeviceInventory];
 }
 
+- (NSMenuItem*)itemWithTitle:(NSString*)title action:(SEL)action key:(NSString*)key {
+    NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:key];
+    item.target = self;
+    return item;
+}
+
 - (void)rebuildMenu {
     [_statusMenu removeAllItems];
 
     ascolto_live_snapshot_t snapshot;
     ascolto_live_app_read_snapshot(_app, &snapshot);
     ascolto_app_state_t st = snapshot.state;
-    bool auto_trig = snapshot.config.auto_trigger_mic;
-    bool paused = snapshot.config.paused;
-    bool save_audio = snapshot.config.save_audio;
-    bool sys_perm_ok = snapshot.sys_audio_permission_ok;
-    float mic_db = snapshot.last_mic_rms_db;
-    float sys_db = snapshot.last_sys_rms_db;
-    char lang[16];
-    snprintf(lang, sizeof(lang), "%s", snapshot.config.language);
-    uint32_t sel_mic = snapshot.config.mic_device_id;
-    uint32_t sel_sys = snapshot.config.sys_device_id;
-    float thresh = snapshot.config.diarizer_threshold;
-    char mic_name[128];
-    snprintf(mic_name, sizeof(mic_name), "%s", snapshot.active_mic_name);
-    char in_apps[256];
-    snprintf(in_apps, sizeof(in_apps), "%s", snapshot.active_in_apps);
-    char out_apps[256];
-    snprintf(out_apps, sizeof(out_apps), "%s", snapshot.active_out_apps);
-    ascolto_call_metadata_t meta = snapshot.call_meta;
-    char last_spk[32];
-    snprintf(last_spk, sizeof(last_spk), "%s", snapshot.last_speaker);
-    char last_txt[256];
-    snprintf(last_txt, sizeof(last_txt), "%s", snapshot.last_utterance_text);
-    int utt_count = snapshot.utterances;
-    int sys_spks = snapshot.remote_speakers;
-
     /* 1. Status Header */
     NSString* stateStr = @"Stato: 🎙️ In attesa di chiamata";
     if (st == ASCOLTO_STATE_RECORDING) {
-        stateStr = [NSString stringWithFormat:@"Stato: 🔴 In registrazione (%d frasi, %d interlocutori)", utt_count, sys_spks];
+        stateStr = [NSString stringWithFormat:@"Stato: 🔴 In registrazione (%d frasi, %d interlocutori)", snapshot.utterances, snapshot.remote_speakers];
     } else if (st == ASCOLTO_STATE_STOPPING) {
         stateStr = @"Stopping transcription…";
     } else if (st == ASCOLTO_STATE_PAUSED) {
         stateStr = @"Stato: ⏸️ Monitoraggio in pausa";
     }
-    NSMenuItem* sItem = [[NSMenuItem alloc] initWithTitle:stateStr action:nil keyEquivalent:@""];
+    NSMenuItem* sItem = [self itemWithTitle:stateStr action:nil key:@""];
     sItem.enabled = NO;
     [_statusMenu addItem:sItem];
 
-    NSString* inStr = [NSString stringWithFormat:@"App IN (MIC): %s", in_apps[0] ? in_apps : "Nessuna"];
-    NSMenuItem* inItem = [[NSMenuItem alloc] initWithTitle:inStr action:nil keyEquivalent:@""];
+    NSString* inStr = [NSString stringWithFormat:@"App IN (MIC): %s", snapshot.active_in_apps[0] ? snapshot.active_in_apps : "Nessuna"];
+    NSMenuItem* inItem = [self itemWithTitle:inStr action:nil key:@""];
     inItem.enabled = NO;
     [_statusMenu addItem:inItem];
 
-    NSString* outStr = [NSString stringWithFormat:@"App OUT (SYS): %s", out_apps[0] ? out_apps : "Nessuna"];
-    NSMenuItem* outItem = [[NSMenuItem alloc] initWithTitle:outStr action:nil keyEquivalent:@""];
+    NSString* outStr = [NSString stringWithFormat:@"App OUT (SYS): %s", snapshot.active_out_apps[0] ? snapshot.active_out_apps : "Nessuna"];
+    NSMenuItem* outItem = [self itemWithTitle:outStr action:nil key:@""];
     outItem.enabled = NO;
     [_statusMenu addItem:outItem];
 
-    if (meta.window_title[0] != '\0') {
-        NSString* wtStr = [NSString stringWithFormat:@"Titolo Finestra: %s", meta.window_title];
-        NSMenuItem* wtItem = [[NSMenuItem alloc] initWithTitle:wtStr action:nil keyEquivalent:@""];
+    if (snapshot.call_meta.window_title[0] != '\0') {
+        NSString* wtStr = [NSString stringWithFormat:@"Titolo Finestra: %s", snapshot.call_meta.window_title];
+        NSMenuItem* wtItem = [self itemWithTitle:wtStr action:nil key:@""];
         wtItem.enabled = NO;
         [_statusMenu addItem:wtItem];
-    } else if (!meta.ax_trusted) {
-        NSMenuItem* axItem = [[NSMenuItem alloc] initWithTitle:@"🔓 Abilita Accessibilità (per leggere titolo finestra call)..."
-                                                        action:@selector(onRequestAccessibility:)
-                                                 keyEquivalent:@""];
-        axItem.target = self;
+    } else if (!snapshot.call_meta.ax_trusted) {
+        NSMenuItem* axItem = [self itemWithTitle:@"🔓 Abilita Accessibilità (per leggere titolo finestra call)..." action:@selector(onRequestAccessibility:) key:@""];
         [_statusMenu addItem:axItem];
     }
 
-    if (meta.calendar_title[0] != '\0') {
-        NSString* calStr = [NSString stringWithFormat:@"📅 Riunione: %s", meta.calendar_title];
-        NSMenuItem* calItem = [[NSMenuItem alloc] initWithTitle:calStr action:nil keyEquivalent:@""];
+    if (snapshot.call_meta.calendar_title[0] != '\0') {
+        NSString* calStr = [NSString stringWithFormat:@"📅 Riunione: %s", snapshot.call_meta.calendar_title];
+        NSMenuItem* calItem = [self itemWithTitle:calStr action:nil key:@""];
         calItem.enabled = NO;
         [_statusMenu addItem:calItem];
-    } else if (!meta.calendar_authorized) {
-        NSMenuItem* calPermItem = [[NSMenuItem alloc] initWithTitle:@"📅 Abilita Calendario (per titolo e partecipanti call)..."
-                                                             action:@selector(onRequestCalendar:)
-                                                      keyEquivalent:@""];
-        calPermItem.target = self;
+    } else if (!snapshot.call_meta.calendar_authorized) {
+        NSMenuItem* calPermItem = [self itemWithTitle:@"📅 Abilita Calendario (per titolo e partecipanti call)..." action:@selector(onRequestCalendar:) key:@""];
         [_statusMenu addItem:calPermItem];
     }
 
-    NSString* mStr = [NSString stringWithFormat:@"Microfono: %s (MIC %.0f dB | SYS %.0f dB)", mic_name, mic_db, sys_db];
-    NSMenuItem* mItem = [[NSMenuItem alloc] initWithTitle:mStr action:nil keyEquivalent:@""];
+    NSString* mStr = [NSString stringWithFormat:@"Microfono: %s (MIC %.0f dB | SYS %.0f dB)", snapshot.active_mic_name, snapshot.last_mic_rms_db, snapshot.last_sys_rms_db];
+    NSMenuItem* mItem = [self itemWithTitle:mStr action:nil key:@""];
     mItem.enabled = NO;
     [_statusMenu addItem:mItem];
 
-    NSString* sysPermStr = sys_perm_ok
+    NSString* sysPermStr = snapshot.sys_audio_permission_ok
         ? @"Audio Sistema (SYS): ✅ CoreAudio Tap attivo (no condivisione schermo)"
         : @"Audio Sistema (SYS): CoreAudio Tap pronto (attiva in Impostazioni se muto)...";
-    NSMenuItem* permItem = [[NSMenuItem alloc] initWithTitle:sysPermStr
-                                                      action:@selector(onRequestSysAudioPermission:)
-                                               keyEquivalent:@""];
-    permItem.target = self;
+    NSMenuItem* permItem = [self itemWithTitle:sysPermStr action:@selector(onRequestSysAudioPermission:) key:@""];
     [_statusMenu addItem:permItem];
 
     NSString* prevStr = nil;
-    if (last_spk[0] != '\0') {
-        prevStr = [NSString stringWithFormat:@"Ultimo [%s]: %s", last_spk, last_txt];
+    if (snapshot.last_speaker[0] != '\0') {
+        prevStr = [NSString stringWithFormat:@"Ultimo [%s]: %s", snapshot.last_speaker, snapshot.last_utterance_text];
     } else {
-        prevStr = [NSString stringWithFormat:@"Ultimo: %s", last_txt];
+        prevStr = [NSString stringWithFormat:@"Ultimo: %s", snapshot.last_utterance_text];
     }
     if (prevStr.length > 68) {
         prevStr = [[prevStr substringToIndex:65] stringByAppendingString:@"..."];
     }
-    NSMenuItem* pItem = [[NSMenuItem alloc] initWithTitle:prevStr action:nil keyEquivalent:@""];
+    NSMenuItem* pItem = [self itemWithTitle:prevStr action:nil key:@""];
     pItem.enabled = NO;
     [_statusMenu addItem:pItem];
 
@@ -230,62 +195,40 @@
 
     /* 2. Manual Start / Stop & Auto-Trigger Toggles */
     if (st == ASCOLTO_STATE_RECORDING || st == ASCOLTO_STATE_STOPPING) {
-        NSMenuItem* stopItem = [[NSMenuItem alloc] initWithTitle:@"⏹ Ferma trascrizione ora"
-                                                          action:@selector(onToggleRecording:)
-                                                   keyEquivalent:@"s"];
-        stopItem.target = self;
+        NSMenuItem* stopItem = [self itemWithTitle:@"⏹ Ferma trascrizione ora" action:@selector(onToggleRecording:) key:@"s"];
         stopItem.enabled = !_sessionTransitionPending && st != ASCOLTO_STATE_STOPPING;
         [_statusMenu addItem:stopItem];
     } else {
-        NSMenuItem* startItem = [[NSMenuItem alloc] initWithTitle:@"▶ Avvia trascrizione ora"
-                                                           action:@selector(onToggleRecording:)
-                                                    keyEquivalent:@"r"];
-        startItem.target = self;
+        NSMenuItem* startItem = [self itemWithTitle:@"▶ Avvia trascrizione ora" action:@selector(onToggleRecording:) key:@"r"];
         startItem.enabled = !_sessionTransitionPending;
         [_statusMenu addItem:startItem];
     }
 
-    NSMenuItem* autoItem = [[NSMenuItem alloc] initWithTitle:@"Attiva automaticamente col microfono"
-                                                      action:@selector(onToggleAutoTrigger:)
-                                               keyEquivalent:@""];
-    autoItem.target = self;
-    autoItem.state = auto_trig ? NSControlStateValueOn : NSControlStateValueOff;
+    NSMenuItem* autoItem = [self itemWithTitle:@"Attiva automaticamente col microfono" action:@selector(onToggleAutoTrigger:) key:@""];
+    autoItem.state = snapshot.config.auto_trigger_mic ? NSControlStateValueOn : NSControlStateValueOff;
     [_statusMenu addItem:autoItem];
 
-    NSMenuItem* pauseMenu = [[NSMenuItem alloc] initWithTitle:@"Sospendi monitoraggio automatico"
-                                                       action:@selector(onTogglePause:)
-                                                keyEquivalent:@""];
-    pauseMenu.target = self;
-    pauseMenu.state = paused ? NSControlStateValueOn : NSControlStateValueOff;
+    NSMenuItem* pauseMenu = [self itemWithTitle:@"Sospendi monitoraggio automatico" action:@selector(onTogglePause:) key:@""];
+    pauseMenu.state = snapshot.config.paused ? NSControlStateValueOn : NSControlStateValueOff;
     [_statusMenu addItem:pauseMenu];
 
-    NSMenuItem* saveAudioItem = [[NSMenuItem alloc] initWithTitle:@"Salva audio compresso (.m4a ~21 MB/ora)"
-                                                           action:@selector(onToggleSaveAudio:)
-                                                    keyEquivalent:@""];
-    saveAudioItem.target = self;
-    saveAudioItem.state = save_audio ? NSControlStateValueOn : NSControlStateValueOff;
+    NSMenuItem* saveAudioItem = [self itemWithTitle:@"Salva audio compresso (.m4a ~21 MB/ora)" action:@selector(onToggleSaveAudio:) key:@""];
+    saveAudioItem.state = snapshot.config.save_audio ? NSControlStateValueOn : NSControlStateValueOff;
     [_statusMenu addItem:saveAudioItem];
-    NSMenuItem* recapItem = [[NSMenuItem alloc] initWithTitle:@"Cloud recap (OpenAI + Claude)"
-        action:@selector(onToggleCloudRecap:) keyEquivalent:@""];
-    recapItem.target = self;
+    NSMenuItem* recapItem = [self itemWithTitle:@"Cloud recap (OpenAI + Claude)" action:@selector(onToggleCloudRecap:) key:@""];
     recapItem.state = snapshot.config.cloud_recap ? NSControlStateValueOn : NSControlStateValueOff;
     [_statusMenu addItem:recapItem];
-    NSMenuItem* ttsItem = [[NSMenuItem alloc] initWithTitle:@"Generate recap voice (OpenAI TTS)"
-        action:@selector(onToggleRecapTTS:) keyEquivalent:@""];
-    ttsItem.target = self;
+    NSMenuItem* ttsItem = [self itemWithTitle:@"Generate recap voice (OpenAI TTS)" action:@selector(onToggleRecapTTS:) key:@""];
     ttsItem.state = snapshot.config.recap_tts ? NSControlStateValueOn : NSControlStateValueOff;
     [_statusMenu addItem:ttsItem];
-    NSMenuItem* runRecap = [[NSMenuItem alloc] initWithTitle:@"Generate recap for the last session"
-        action:@selector(onRunRecap:) keyEquivalent:@""];
-    runRecap.target = self;
+    NSMenuItem* runRecap = [self itemWithTitle:@"Generate recap for the last session" action:@selector(onRunRecap:) key:@""];
     runRecap.enabled = snapshot.current_md_path[0] && st != ASCOLTO_STATE_RECORDING && st != ASCOLTO_STATE_STOPPING;
     [_statusMenu addItem:runRecap];
-
 
     [_statusMenu addItem:[NSMenuItem separatorItem]];
 
     /* 3. Language Submenu */
-    NSMenuItem* langRoot = [[NSMenuItem alloc] initWithTitle:@"Lingua trascrizione (Whistle)" action:nil keyEquivalent:@""];
+    NSMenuItem* langRoot = [self itemWithTitle:@"Lingua trascrizione (Whistle)" action:nil key:@""];
     NSMenu* langMenu = [[NSMenu alloc] initWithTitle:@"Lingua"];
     struct { const char* code; const char* label; } langs[] = {
         {"auto", "Rilevamento automatico (Auto)"},
@@ -298,12 +241,9 @@
         {"pl",   "Polski (pl)"}
     };
     for (size_t i = 0; i < sizeof(langs)/sizeof(langs[0]); i++) {
-        NSMenuItem* li = [[NSMenuItem alloc] initWithTitle:[NSString stringWithUTF8String:langs[i].label]
-                                                    action:@selector(onSelectLanguage:)
-                                             keyEquivalent:@""];
-        li.target = self;
+        NSMenuItem* li = [self itemWithTitle:[NSString stringWithUTF8String:langs[i].label] action:@selector(onSelectLanguage:) key:@""];
         li.representedObject = [NSString stringWithUTF8String:langs[i].code];
-        if (strcmp(lang, langs[i].code) == 0) {
+        if (strcmp(snapshot.config.language, langs[i].code) == 0) {
             li.state = NSControlStateValueOn;
         }
         [langMenu addItem:li];
@@ -315,58 +255,46 @@
     const ascolto_macos_device_info_t* devs = _deviceInventory.bytes;
     int n_devs = (int)(_deviceInventory.length / sizeof(*devs));
 
-    NSMenuItem* micRoot = [[NSMenuItem alloc] initWithTitle:@"Dispositivo Microfono (Io / ME)" action:nil keyEquivalent:@""];
+    NSMenuItem* micRoot = [self itemWithTitle:@"Dispositivo Microfono (Io / ME)" action:nil key:@""];
     NSMenu* micSub = [[NSMenu alloc] initWithTitle:@"Microfono"];
-    NSMenuItem* defMicItem = [[NSMenuItem alloc] initWithTitle:@"Predefinito di sistema"
-                                                        action:@selector(onSelectMicDevice:)
-                                                 keyEquivalent:@""];
-    defMicItem.target = self;
+    NSMenuItem* defMicItem = [self itemWithTitle:@"Predefinito di sistema" action:@selector(onSelectMicDevice:) key:@""];
     defMicItem.tag = 0;
-    if (sel_mic == 0) defMicItem.state = NSControlStateValueOn;
+    if (snapshot.config.mic_device_id == 0) defMicItem.state = NSControlStateValueOn;
     [micSub addItem:defMicItem];
     [micSub addItem:[NSMenuItem separatorItem]];
 
     for (int i = 0; i < n_devs; i++) {
         if (!devs[i].is_input) continue;
         NSString* dTitle = [NSString stringWithFormat:@"%s (ID %u)", devs[i].device_name, devs[i].device_id];
-        NSMenuItem* di = [[NSMenuItem alloc] initWithTitle:dTitle
-                                                    action:@selector(onSelectMicDevice:)
-                                             keyEquivalent:@""];
-        di.target = self;
+        NSMenuItem* di = [self itemWithTitle:dTitle action:@selector(onSelectMicDevice:) key:@""];
         di.tag = (NSInteger)devs[i].device_id;
-        if (sel_mic == devs[i].device_id) di.state = NSControlStateValueOn;
+        if (snapshot.config.mic_device_id == devs[i].device_id) di.state = NSControlStateValueOn;
         [micSub addItem:di];
     }
     micRoot.submenu = micSub;
     [_statusMenu addItem:micRoot];
 
-    NSMenuItem* sysRoot = [[NSMenuItem alloc] initWithTitle:@"Sorgente Audio Call (Altri / SYS)" action:nil keyEquivalent:@""];
+    NSMenuItem* sysRoot = [self itemWithTitle:@"Sorgente Audio Call (Altri / SYS)" action:nil key:@""];
     NSMenu* sysSub = [[NSMenu alloc] initWithTitle:@"Audio Sistema"];
-    NSMenuItem* autoSysItem = [[NSMenuItem alloc] initWithTitle:@"Automatico (Virtual / Loopback)"
-                                                         action:@selector(onSelectSysDevice:)
-                                                  keyEquivalent:@""];
-    autoSysItem.target = self;
+    NSMenuItem* autoSysItem = [self itemWithTitle:@"Automatico (Virtual / Loopback)" action:@selector(onSelectSysDevice:) key:@""];
     autoSysItem.tag = 0;
-    if (sel_sys == 0) autoSysItem.state = NSControlStateValueOn;
+    if (snapshot.config.sys_device_id == 0) autoSysItem.state = NSControlStateValueOn;
     [sysSub addItem:autoSysItem];
     [sysSub addItem:[NSMenuItem separatorItem]];
 
     for (int i = 0; i < n_devs; i++) {
         if (!devs[i].is_input) continue;
         NSString* dTitle = [NSString stringWithFormat:@"%s (ID %u)", devs[i].device_name, devs[i].device_id];
-        NSMenuItem* di = [[NSMenuItem alloc] initWithTitle:dTitle
-                                                    action:@selector(onSelectSysDevice:)
-                                             keyEquivalent:@""];
-        di.target = self;
+        NSMenuItem* di = [self itemWithTitle:dTitle action:@selector(onSelectSysDevice:) key:@""];
         di.tag = (NSInteger)devs[i].device_id;
-        if (sel_sys == devs[i].device_id) di.state = NSControlStateValueOn;
+        if (snapshot.config.sys_device_id == devs[i].device_id) di.state = NSControlStateValueOn;
         [sysSub addItem:di];
     }
     sysRoot.submenu = sysSub;
     [_statusMenu addItem:sysRoot];
 
     /* 5. Speaker Diarization Sensitivity Submenu */
-    NSMenuItem* diarRoot = [[NSMenuItem alloc] initWithTitle:@"Sensibilità Interlocutori (Diarization)" action:nil keyEquivalent:@""];
+    NSMenuItem* diarRoot = [self itemWithTitle:@"Sensibilità Interlocutori (Diarization)" action:nil key:@""];
     NSMenu* diarSub = [[NSMenu alloc] initWithTitle:@"Diarization"];
     struct { float val; const char* label; } presets[] = {
         {0.72f, "Alta — Distingue più interlocutori (0.72)"},
@@ -374,12 +302,9 @@
         {0.48f, "Conservativa — Meno interlocutori (0.48)"}
     };
     for (size_t i = 0; i < 3; i++) {
-        NSMenuItem* pi = [[NSMenuItem alloc] initWithTitle:[NSString stringWithUTF8String:presets[i].label]
-                                                    action:@selector(onSelectDiarizerThreshold:)
-                                             keyEquivalent:@""];
-        pi.target = self;
+        NSMenuItem* pi = [self itemWithTitle:[NSString stringWithUTF8String:presets[i].label] action:@selector(onSelectDiarizerThreshold:) key:@""];
         pi.representedObject = @(presets[i].val);
-        if (fabsf(thresh - presets[i].val) < 0.04f) {
+        if (fabsf(snapshot.config.diarizer_threshold - presets[i].val) < 0.04f) {
             pi.state = NSControlStateValueOn;
         }
         [diarSub addItem:pi];
@@ -390,30 +315,18 @@
     [_statusMenu addItem:[NSMenuItem separatorItem]];
 
     /* 6. Quick Actions: Open Latest Transcript, Open Folder, Edit Keywords */
-    NSMenuItem* openLastItem = [[NSMenuItem alloc] initWithTitle:@"Apri ultima trascrizione (.md)"
-                                                          action:@selector(onOpenLastTranscript:)
-                                                   keyEquivalent:@"o"];
-    openLastItem.target = self;
+    NSMenuItem* openLastItem = [self itemWithTitle:@"Apri ultima trascrizione (.md)" action:@selector(onOpenLastTranscript:) key:@"o"];
     [_statusMenu addItem:openLastItem];
 
-    NSMenuItem* openDirItem = [[NSMenuItem alloc] initWithTitle:@"Apri cartella trascrizioni..."
-                                                         action:@selector(onOpenOutputFolder:)
-                                                  keyEquivalent:@""];
-    openDirItem.target = self;
+    NSMenuItem* openDirItem = [self itemWithTitle:@"Apri cartella trascrizioni..." action:@selector(onOpenOutputFolder:) key:@""];
     [_statusMenu addItem:openDirItem];
 
-    NSMenuItem* editKwItem = [[NSMenuItem alloc] initWithTitle:@"Modifica Keywords personalizzate..."
-                                                        action:@selector(onEditKeywords:)
-                                                 keyEquivalent:@""];
-    editKwItem.target = self;
+    NSMenuItem* editKwItem = [self itemWithTitle:@"Modifica Keywords personalizzate..." action:@selector(onEditKeywords:) key:@""];
     [_statusMenu addItem:editKwItem];
 
     [_statusMenu addItem:[NSMenuItem separatorItem]];
 
-    NSMenuItem* quitItem = [[NSMenuItem alloc] initWithTitle:@"Esci da Ascolto"
-                                                      action:@selector(onQuit:)
-                                               keyEquivalent:@"q"];
-    quitItem.target = self;
+    NSMenuItem* quitItem = [self itemWithTitle:@"Esci da Ascolto" action:@selector(onQuit:) key:@"q"];
     [_statusMenu addItem:quitItem];
 }
 

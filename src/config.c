@@ -1,3 +1,4 @@
+#include "ascolto/filesystem.h"
 #include "ascolto.h"
 #include "ascolto/json.h"
 
@@ -7,19 +8,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-static void ensure_parent_dir(const char* file_path) {
-    if (!file_path) return;
-    char tmp[512];
-    snprintf(tmp, sizeof(tmp), "%s", file_path);
-    for (char* p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            mkdir(tmp, 0755);
-            *p = '/';
-        }
-    }
-}
 
 void ascolto_config_init_defaults(ascolto_config_t* cfg) {
     if (!cfg) return;
@@ -133,14 +121,12 @@ static void json_write_string(FILE* file, const char* key, const char* value, bo
 int ascolto_config_save(const ascolto_config_t* cfg, const char* path_override) {
     if (!cfg) return -1;
     const char* path = (path_override && path_override[0]) ? path_override : cfg->config_path;
-    ensure_parent_dir(path);
+    ascolto_mkdir_parent(path);
 
     /* Also ensure output_dir and keywords file exist */
-    char dummy_out[540];
-    snprintf(dummy_out, sizeof(dummy_out), "%s/.keep", cfg->output_dir);
-    ensure_parent_dir(dummy_out);
+    ascolto_mkdir_p(cfg->output_dir);
 
-    ensure_parent_dir(cfg->keywords_path);
+    ascolto_mkdir_parent(cfg->keywords_path);
     FILE* kf = fopen(cfg->keywords_path, "ab");
     if (kf) fclose(kf);
 

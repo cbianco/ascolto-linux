@@ -1,14 +1,10 @@
-#include "ascolto.h"
+#include "ascolto/offline.h"
 
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-const char* ascolto_channel_name(ascolto_channel_t ch) {
-    return (ch == ASCOLTO_CHANNEL_MIC) ? "MIC" : "SYS";
-}
 
 int ascolto_wav_load(const char* path, ascolto_audio_buffer_t* out_buf) {
     if (!path || !out_buf) return -1;

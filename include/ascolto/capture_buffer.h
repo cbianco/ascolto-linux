@@ -18,6 +18,7 @@ int ascolto_capture_buffer_pop(ascolto_capture_buffer_t* buffer, float* mic, flo
 int ascolto_capture_buffer_available(const ascolto_capture_buffer_t* buffer, ascolto_channel_t channel);
 int64_t ascolto_capture_buffer_dropped(const ascolto_capture_buffer_t* buffer);
 int64_t ascolto_capture_buffer_padded(const ascolto_capture_buffer_t* buffer, ascolto_channel_t channel);
+/* Deterministic verifier linked by test targets only. */
 int ascolto_capture_buffer_verify(void);
 
 #ifdef __cplusplus

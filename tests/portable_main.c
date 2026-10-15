@@ -110,8 +110,57 @@ static int verify_processing(void) {
     return failures;
 }
 
+static int verify_mic_activity(void) {
+    ascolto_echo_filter_t echo;
+    ascolto_echo_filter_reset(&echo);
+    ascolto_mic_activity_t *activity = &echo.mic;
+    int failures = 0;
+
+    /* Inactive SYS levels must not contribute to overlap or its peak. */
+    ascolto_mic_activity_track(activity, true, false, -10);
+    if (activity->frames != 1 || activity->sys_frames != 0 || activity->sys_peak_db != -100) failures++;
+    ascolto_mic_activity_track(activity, true, true, -30);
+    ascolto_mic_activity_track(activity, true, true, -35);
+    ascolto_mic_activity_track(activity, true, true, -25);
+    ascolto_mic_activity_track(activity, true, false, -5);
+    ascolto_mic_activity_t turn = ascolto_mic_activity_take(activity);
+    if (turn.frames != 5 || turn.sys_frames != 3 || turn.sys_peak_db != -25) failures++;
+    if (activity->frames != 0 || activity->sys_frames != 0 || activity->sys_peak_db != -100) failures++;
+    turn = ascolto_mic_activity_take(activity);
+    if (turn.frames != 0 || turn.sys_frames != 0 || turn.sys_peak_db != -100) failures++;
+
+    /* A later turn cannot inherit the previous turn's counters or louder peak. */
+    ascolto_mic_activity_track(activity, true, true, -32);
+    turn = ascolto_mic_activity_take(activity);
+    if (turn.frames != 1 || turn.sys_frames != 1 || turn.sys_peak_db != -32) failures++;
+    ascolto_mic_activity_track(activity, true, true, -20);
+    ascolto_mic_activity_track(activity, false, true, -10);
+    turn = ascolto_mic_activity_take(activity);
+    if (turn.frames != 0 || turn.sys_frames != 0 || turn.sys_peak_db != -100) failures++;
+    return failures;
+}
+
+static int verify_echo_history(void) {
+    ascolto_echo_filter_t echo;
+    ascolto_echo_filter_reset(&echo);
+    for (int i = 0; i < 10; i++) ascolto_mic_activity_track(&echo.mic, true, true, -30);
+    ascolto_mic_activity_t activity = ascolto_mic_activity_take(&echo.mic);
+    const char *old_text = "Release planned tomorrow";
+    ascolto_echo_filter_remember(&echo, old_text, 0, 1, -30);
+    int failures = !ascolto_echo_filter_matches(&echo, old_text, 0, 1, -32, &activity);
+    for (int i = 0; i < ASCOLTO_RECENT_SYS_TURNS; i++)
+        ascolto_echo_filter_remember(&echo, "Database migration finished", 0, 1, -30);
+    if (ascolto_echo_filter_matches(&echo, old_text, 0, 1, -32, &activity)) failures++;
+    if (!ascolto_echo_filter_matches(&echo, "Database migration finished", 0, 1, -32, &activity)) failures++;
+    if (ascolto_echo_filter_matches(&echo, "Database migration finished", 0, 1, -25, &activity)) failures++;
+    ascolto_echo_filter_reset(&echo);
+    if (ascolto_echo_filter_matches(&echo, "Database migration finished", 0, 1, -32, &activity)) failures++;
+    return failures;
+}
+
 int main(void) {
-    int failures = ascolto_capture_buffer_verify() + verify_consumer() + verify_processing();
+    int failures = ascolto_capture_buffer_verify() + verify_consumer() + verify_processing() +
+                   verify_mic_activity() + verify_echo_history();
     printf("Portable queue/VAD/echo regressions: %d failures\n", failures);
     return failures ? 1 : 0;
 }

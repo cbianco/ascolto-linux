@@ -1,4 +1,4 @@
-#include "ascolto.h"
+#include "ascolto/offline.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -206,7 +206,7 @@ int ascolto_run_room_bench(ascolto_whistle_t* whistle, const char* output_dir) {
             pos += n;
         }
         ascolto_live_app_stop_session(&app);
-        FILE* trace = fopen(app.current_jsonl_path, "r");
+        FILE* trace = fopen(app.files.jsonl_path, "r");
         int false_me = 0, mic_turns = 0, sys_turns = 0, wrong_speaker = 0;
         int labels[4] = {0};
         char line[8192];

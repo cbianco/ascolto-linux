@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+const char* ascolto_channel_name(ascolto_channel_t ch) {
+    return (ch == ASCOLTO_CHANNEL_MIC) ? "MIC" : "SYS";
+}
+
 float ascolto_audio_rms_db(const float* samples, int num_samples) {
     if (!samples || num_samples <= 0) return -100.0f;
     double sum_sq = 0.0;
@@ -41,7 +45,6 @@ void ascolto_online_vad_reset(ascolto_online_vad_t* v) {
     if (!v) return;
     v->write_pos = 0;
     v->in_speech = false;
-    v->speech_start_sample = 0;
     v->last_voiced_sample = 0;
     v->total_samples_processed = 0;
 }
@@ -77,7 +80,6 @@ void ascolto_online_vad_feed(
             if (!v->in_speech) {
                 v->in_speech = true;
                 v->write_pos = 0;
-                v->speech_start_sample = 0;
                 v->last_voiced_sample = 0;
             }
             int can_copy = (v->write_pos + step <= v->capacity) ? step : (v->capacity - v->write_pos);
@@ -305,4 +307,52 @@ bool ascolto_echo_turn_matches(const char *mic_text, double start, double end, f
                                double sys_start, double sys_end, float sys_db) {
     return !local_interruption && overlap_ratio >= 0.30f && start <= sys_end + 3.5 && end >= sys_start - 2.0 &&
            rms_db < sys_db + 3.5f && ascolto_is_lexical_echo(mic_text, sys_text);
+}
+
+static void mic_activity_reset(ascolto_mic_activity_t *activity) {
+    *activity = (ascolto_mic_activity_t){.sys_peak_db = -100.0f};
+}
+
+void ascolto_echo_filter_reset(ascolto_echo_filter_t *filter) {
+    filter->sys_frames = 0;
+    filter->turn_count = 0;
+    mic_activity_reset(&filter->mic);
+    for (int i = 0; i < ASCOLTO_SYS_ENV_HISTORY; i++) filter->sys_db[i] = -100.0f;
+}
+
+void ascolto_mic_activity_track(ascolto_mic_activity_t *activity, bool in_speech,
+                                bool sys_active, float sys_db) {
+    if (!in_speech) { mic_activity_reset(activity); return; }
+    activity->frames++;
+    if (sys_active) {
+        activity->sys_frames++;
+        if (sys_db > activity->sys_peak_db) activity->sys_peak_db = sys_db;
+    }
+}
+
+ascolto_mic_activity_t ascolto_mic_activity_take(ascolto_mic_activity_t *activity) {
+    ascolto_mic_activity_t previous = *activity;
+    mic_activity_reset(activity);
+    return previous;
+}
+
+void ascolto_echo_filter_remember(ascolto_echo_filter_t *filter, const char *text,
+                                  double start, double end, float rms_db) {
+    ascolto_echo_turn_t *turn = &filter->turns[filter->turn_count++ % ASCOLTO_RECENT_SYS_TURNS];
+    turn->start_s = start;
+    turn->end_s = end;
+    turn->rms_db = rms_db;
+    snprintf(turn->text, sizeof(turn->text), "%s", text);
+}
+
+bool ascolto_echo_filter_matches(const ascolto_echo_filter_t *filter, const char *text,
+    double start, double end, float rms_db, const ascolto_mic_activity_t *activity) {
+    float overlap = activity->frames ? (float)activity->sys_frames / activity->frames : 0;
+    bool interruption = activity->sys_frames >= 3 && rms_db >= activity->sys_peak_db + 1.0f;
+    for (unsigned i = 0; i < filter->turn_count && i < ASCOLTO_RECENT_SYS_TURNS; i++) {
+        const ascolto_echo_turn_t *turn = &filter->turns[i];
+        if (ascolto_echo_turn_matches(text, start, end, rms_db, overlap, interruption,
+                                     turn->text, turn->start_s, turn->end_s, turn->rms_db)) return true;
+    }
+    return false;
 }

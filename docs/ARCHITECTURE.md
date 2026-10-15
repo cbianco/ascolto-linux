@@ -1,33 +1,96 @@
-# Architecture and Implementation Plan
+# Architecture
 
-## 1. Target Environment Baseline
+Ascolto has native Linux and macOS applications with a small portable audio core.
+Keep native capture, UI, configuration and archive formats at their platform
+boundaries. Linux source paths remain compatible with upstream merges. The
+integration history and algorithm comparison are in [INTEGRATION.md](INTEGRATION.md).
 
-Inspected on host `voloire-XPS`:
+## Data flow
 
-- **OS**: Ubuntu 26.04.1 LTS (Resolute Raccoon), Kernel `7.0.0-38-generic` x86_64
-- **CPU / Memory**: Intel Core i7-8550U (4 cores / 8 threads @ 1.80 GHz, AVX2), 14 GiB RAM
-- **Desktop**: GNOME Shell 50.1 on Wayland (`ubuntu:GNOME`), extension `ubuntu-appindicators@ubuntu.com` enabled
-- **Audio Stack**: PipeWire 1.6.2 + WirePlumber 1.6.2 (`pw-dump`, `pw-record`, `pw-play`, `wpctl`, `libpipewire-0.3`, `libpulse0`)
-- **Toolchain & Dev Packages**: `gcc` 15.2.0, `make`, `pkg-config`, `libglib2.0-dev`, `libgio-2.0-dev`, `libjson-glib-dev`, `libavcodec-dev`, `libavformat-dev`, `libavutil-dev`, plus runtime libraries `libgtk-3-0t64` and `libayatana-appindicator3-1`
+```text
+Native MIC/SYS capture
+    -> timestamped paired PCM queue
+    -> one audio consumer (SYS before MIC)
+    -> energy gate and streaming VAD
+    -> Whistle transcription and speaker identification
+    -> transcript writer and optional audio archive
+    -> optional Python recap worker after archive completion
+```
 
-## 2. Modular Architecture
+Both channels carry 16 kHz mono float PCM. A processing frame contains 320 samples
+(20 ms). Capture producers enqueue samples; they never run speech recognition.
+The queue retains startup offsets, pads missing channels after a bounded wait,
+and represents overflow as equal-duration silence on both channels. Stopping
+capture drains every queued sample before transcript/audio resources close.
 
-`ascolto` is structured around clean C vtable interfaces so that every subsystem can run against either production Linux backends or deterministic test-harness backends:
+## Portable modules
 
-1. **`ascolto_core`**: finite state machine (`IDLE`, `RECORDING_AUTO`, `RECORDING_MANUAL`, `PAUSED`), session lifecycle, configuration persistence (`~/.config/ascolto/config.ini`), and transcript writer.
-2. **`mic_watcher`**: monitors PipeWire / PulseAudio graph changes to detect active capture streams from third-party applications (excluding `ascolto` itself) with configurable start/stop debounce.
-3. **`audio_capture`**: dual 16 kHz mono PCM capture streams:
-   - `MIC` channel from the selected microphone source.
-   - `SYS` channel from the selected sink monitor source.
-4. **`whistle_engine`**: C wrapper around Cactus Compute Whistle (`needle.h`, `libneedle.a`, `whistle.cact`) providing streaming transcription, language selection, custom keyword boosting, and per-segment speech embedding extraction.
-5. **`speaker_diarizer`**: deterministic `ME` assignment on `MIC` segments and online L2-normalized cosine similarity clustering with exponential moving average centroids on `SYS` embeddings to label `SPEAKER_1`, `SPEAKER_2`, ..., `SPEAKER_N`.
-6. **`tray_ui`**: GNOME top bar integration over D-Bus (`org.kde.StatusNotifierItem` and `com.canonical.dbusmenu` / `libayatana-appindicator3`) displaying live status and timer (`MM:SS`) and exposing all configuration controls.
-7. **`observability`**: structured JSONL event bus and Unix domain control socket (`/run/user/<uid>/ascolto.sock` or configurable path) used by `ascoltoctl` and automated tests.
+- `audio_types.h`: sample rate, frame size, channel identity and naming.
+- `capture_buffer.c`: paired sample timeline, padding and overflow accounting.
+- `audio_queue.c`: threaded paired consumer used by the Linux backend.
+- `audio_processing.c`: RMS, streaming VAD, recent SYS envelope lookup, transcript
+  filtering, MIC activity statistics and recent SYS turn history. Both controllers
+  use the same echo state and matching rules; native VAD tuning stays explicit.
+- `filesystem.c`: directory and parent-directory creation.
+- `scripts/recap.py`: optional cloud transcription, recap and TTS. It adapts Linux
+  FLAC folders and macOS stereo M4A archives without replacing local artifacts.
 
-## 3. Delivery Phases
+## Native responsibilities
 
-1. **Phase 1 - Test Harness & Observability**: event bus, Unix control socket, mock audio/trigger/UI backends, multi-speaker call simulator, and automated unit + E2E test runner.
-2. **Phase 2 - Whistle Engine & Speaker Diarizer**: integration with `needle.h` / `libneedle.a` / `whistle.cact`, dual-stream segment merger, and cosine speaker clustering.
-3. **Phase 3 - PipeWire Audio & Auto-Trigger Backend**: live microphone activity detection and dual-channel capture (MIC + SYS monitor).
-4. **Phase 4 - GNOME Top Bar Indicator & Configuration**: tray icon, live timer, menu items, custom keywords dialog, and transcript management.
-5. **Phase 5 - End-to-End Verification**: full test suite execution and sanitizer checks.
+| Responsibility | Linux | macOS |
+| --- | --- | --- |
+| Startup | `main.c` | `app_main.c` |
+| Lifecycle and processing | `core.c` | `live_session.c` |
+| Capture and monitoring | `audio_backend.c` | `capture_macos.c`, `mic_monitor.c` |
+| Transcript writing | `core.c` | `macos/transcript.c` |
+| Audio archive and recap launch | `audio_recorder.c`, `recap.c` | `macos/recap.c` |
+| Control protocol | `control.c` | `macos/control.m` |
+| Socket transport and telemetry | `observability.c` | `macos/control.m`, `diagnostics.c` |
+| UI | `tray_ui.c` | `menubar_macos.m` |
+| Settings | `types_config.c`, INI | `config.c`, JSON and keywords file |
+| Engine and diarization | `whistle_engine.c`, `diarizer.c` | Corresponding files under `macos/` |
+
+The engine/diarizer API families have colliding names and different contracts;
+they are not linked into one binary. Their numerical representations, thresholds,
+word timing support and ownership rules are preserved. Likewise, pause semantics,
+device identifiers, transcript schemas and archive codecs remain native.
+
+On macOS the controller owns lifecycle state; its `files` member groups the
+resources owned by the transcript writer. Only the controller changes recording
+state. The transcript writer closes files and schedules archive finalization.
+UI and CLI mutations share the menu's serial action queue. CoreAudio monitoring
+remains independent and uses the controller's synchronized entry points.
+
+## Concurrency invariants
+
+- Audio processing is serialized. No UI read waits on the ASR processing lock.
+- macOS UI/status reads copy a snapshot under a dedicated short-held mutex.
+- A committed STOPPING transition completes its generation even if preferences
+  change. Duplicate stops wait; a new start returns busy until draining finishes.
+- Stop/join operations release the controller mutex before waiting for capture.
+- Device inventory and call metadata queries run off the UI thread. AppKit owns
+  an immutable device cache, and menu construction reads only that cache.
+- Menu action completion and timers use common run-loop modes.
+- Compression publishes completed archives atomically. Shutdown waits for archive
+  jobs off the UI thread. Recap is opt-in and starts after archive publication.
+
+## Offline tools and verification
+
+`offline.h` contains WAV, simulated-monitor, offline segmentation and report
+contracts. `session.c` supports simulation and archive reprocessing, including
+legacy recordings with channel startup/callback drift. Its alignment path is
+intentionally separate from the timestamped live pipeline.
+
+The macOS app excludes WAV utilities, the simulated monitor, offline session/VAD,
+acoustic rooms and the deterministic queue verifier. The harness links these
+modules explicitly. Linux keeps its mock/inspection CLI commands available.
+
+Use `make test`, `make test-portable`, `make test-recap`, and
+`make compare-diarizers` for the relevant suites. `make test-capture` is the
+separate opt-in hardware check. Acoustic fixtures and mocked text hints verify
+pipeline behavior; they do not establish recognition accuracy on arbitrary calls.
+
+`GNUmakefile` selects the native makefile. macOS shares compiled objects under
+`build/macos`, tracks headers and makefile changes, and packages the bundle only
+when an input changes. Linux retains its native object build. Use distinct
+checkouts when sharing a filesystem between operating systems.

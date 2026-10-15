@@ -1,4 +1,4 @@
-#include "ascolto.h"
+#include "ascolto/offline.h"
 #include "needle.h"
 
 #include <ctype.h>
@@ -647,7 +647,7 @@ static int cmd_test(const char* model_path) {
         /* Trigger hardware mic release -> stops session & closes files */
         ascolto_live_app_on_mic_hardware_change(&app, false, "Microfono Test");
 
-        FILE* mdf = fopen(app.current_md_path, "r");
+        FILE* mdf = fopen(app.files.md_path, "r");
         char md_content[4096] = {0};
         if (mdf) {
             size_t nr = fread(md_content, 1, sizeof(md_content) - 1, mdf);

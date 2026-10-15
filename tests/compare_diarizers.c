@@ -1,5 +1,5 @@
 #ifdef ASCOLTO_COMPARE_MACOS
-#include "ascolto.h"
+#include "ascolto/offline.h"
 #else
 #include "ascolto/diarizer.h"
 #include "ascolto/whistle_engine.h"

@@ -21,7 +21,7 @@ macOS Menu Bar application in C/Obj-C (`bin/Ascolto.app`) that automatically det
 
 ## File Map
 
-- `include/ascolto/audio_types.h`, `capture_buffer.h`, and `audio_processing.h`: shared PCM/channel contract, timestamped queue, streaming VAD, and echo/transcript filter APIs. `src/audio_processing.c` is used by both platforms.
+- `include/ascolto/audio_types.h`, `capture_buffer.h`, and `audio_processing.h`: shared PCM/channel contract, timestamped queue, streaming VAD, echo history and MIC activity state. `src/audio_processing.c` is used by both platforms. `src/filesystem.c` provides shared directory creation. Queue verification lives in `tests/capture_buffer_verify.c`, linked only by test targets.
 - `src/audio_queue.c`: portable paired consumer used by Linux; capture producers never run ASR. Linux stop remains STOPPING until all queued PCM and FLAC samples have drained.
 - `src/macos/recap.c`: argument-based process spawning, background archive finalization, atomic archive publication, optional recap launch after compression, and background shutdown wait. Cloud recap and TTS are disabled by default. Original local artifacts are retained.
 - `src/macos/control.m`: owner-only Unix socket; STATUS reads snapshots, mutations run on the menu's serial action queue. Stop this server off-main before freeing the app.
@@ -33,7 +33,7 @@ macOS Menu Bar application in C/Obj-C (`bin/Ascolto.app`) that automatically det
 - `src/capture_buffer.c`: timestamped dual-channel queue, paired 20ms consumption, missing-channel padding, overload diagnostics, and deterministic capture stress verification. Capture callbacks enqueue samples; ASR runs on the consumer thread. Session shutdown drains queued samples before closing artifacts.
 - Queue overflow is emitted as equal-duration silence on both channels before retained PCM, including repeated overflow during recovery. Never drop elapsed time or join speech across an unrepresented gap.
 - `src/mic_monitor.c`: CoreAudio device enumeration, active `IN`/`OUT` app detection (`kAudioHardwarePropertyProcessObjectList`), window title (`AXUIElement`), and calendar metadata (`EventKit`).
-- `src/live_session.c`: streaming VAD, Speaker Bleed Gate (`SYS->MIC`), ASR hallucination filter, live `.md`/`.jsonl` writer, and `.m4a` compression.
+- `src/live_session.c`: macOS session lifecycle, streaming VAD, Speaker Bleed Gate (`SYS->MIC`), and ASR orchestration. `src/macos/transcript.c` owns live `.md`/`.jsonl` and raw-audio resources; `src/macos/recap.c` finalizes `.m4a` archives. Lifecycle state stays in the controller.
 - `src/macos/whistle_engine.c`: macOS `needle.h` wrapper (`needle_load`, `needle_transcribe`, `needle_embed`, `needle_stream_*`). The upstream Linux wrapper remains at `src/whistle_engine.c`.
 - `src/macos/diarizer.c`: 16-D voiceprint extraction (F0 autocorrelation, Goertzel spectral centroid/rolloff/sub-bands, Whistle 512-d projections) and online cosine clustering (`ME` on `MIC`, `SPEAKER_1..N` on `SYS`). The upstream Linux diarizer remains at `src/diarizer.c`.
 - `src/menubar_macos.m` / `src/app_main.c`: `NSStatusBar` UI (`NSApplicationActivationPolicyAccessory`, no Dock icon) and bundle path resolution.
@@ -42,7 +42,9 @@ macOS Menu Bar application in C/Obj-C (`bin/Ascolto.app`) that automatically det
 - CoreAudio device inventory is queried on a dedicated background queue. The main thread owns an immutable cache; `rebuildMenu` must never call CoreAudio directly. Session-action completion and timers use common run-loop modes so menu tracking cannot leave the busy title stale.
 - `src/diagnostics.c`: asynchronous timing/state/HAL-operation log beside the configuration file (`~/.config/ascolto/diagnostics.log` by default). Contains no captured PCM, transcripts, application titles, or calendar details. Rotates the previous log on startup when it exceeds 2 MiB. No diagnostic file I/O runs on the UI thread after initialization.
 - `src/config.c`: persistent settings in `~/.config/ascolto/config.json` and `~/.config/ascolto/keywords.txt`.
-- `src/harness_main.c` / `src/session.c` / `src/vad.c` / `src/wav_audio.c`: autonomous test harness and offline pipeline.
+- `include/ascolto/offline.h`, `src/harness_main.c`, `src/session.c`, `src/vad.c`, `src/wav_audio.c`, and `src/simulated_monitor.c`: autonomous test harness and offline pipeline, excluded from the shipped macOS app.
+- `src/core.c`: Linux lifecycle and audio orchestration. `src/control.c` implements its control protocol, `src/observability.c` owns socket transport and telemetry, and `src/recap.c` launches its optional recap worker.
+- `Makefile.macos`: shared objects under `build/macos`, generated header dependencies, separate app/offline source lists, and incremental bundle packaging. Preserve both native build paths.
 - `src/room_bench.c`: acoustic room synthesis, known dialogue timelines, content/speaker checks, and machine-readable feedback from the live pipeline. Synthetic voices do not establish accuracy on arbitrary real-world speakers.
 - `tests/regression_main.c`: production session/VAD/queue regressions with a controllable hardware-drain replacement. Verifies UI snapshots during blocked processing, preference changes and duplicate stops during drain, and preserved VAD/raw-audio time after overflow; opens no real microphone.
 

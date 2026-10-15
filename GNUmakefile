@@ -12,7 +12,7 @@ endif
 .PHONY: test-portable
 test-portable:
 	@mkdir -p bin
-	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Iinclude src/capture_buffer.c src/audio_queue.c src/audio_processing.c tests/portable_main.c -o bin/ascolto-portable-test -lpthread -lm
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Iinclude src/capture_buffer.c src/audio_queue.c src/audio_processing.c tests/capture_buffer_verify.c tests/portable_main.c -o bin/ascolto-portable-test -lpthread -lm
 	./bin/ascolto-portable-test
 
 # Compare both algorithms against identical PCM using the host's Needle library.
@@ -30,7 +30,7 @@ FIXTURE_DIR ?= tests/fixtures
 compare-diarizers: deps
 	@mkdir -p bin
 	$(CC) -std=c11 -O2 -Wall -Wextra -Iinclude $(COMPARE_HEADERS) -DASCOLTO_COMPARE_MACOS src/macos/diarizer.c src/macos/whistle_engine.c src/wav_audio.c src/audio_processing.c tests/compare_diarizers.c -o bin/compare-diarizer-macos $(COMPARE_NEEDLE) -lpthread -lm
-	$(CC) -std=c11 -O2 -Wall -Wextra -Iinclude $(COMPARE_HEADERS) src/diarizer.c src/whistle_engine.c src/types_config.c tests/compare_diarizers.c -o bin/compare-diarizer-linux $(COMPARE_NEEDLE) -lpthread -lm
+	$(CC) -std=c11 -O2 -Wall -Wextra -Iinclude $(COMPARE_HEADERS) src/diarizer.c src/whistle_engine.c src/types_config.c src/filesystem.c src/audio_processing.c tests/compare_diarizers.c -o bin/compare-diarizer-linux $(COMPARE_NEEDLE) -lpthread -lm
 	./bin/compare-diarizer-macos $(COMPARE_MODEL) $(FIXTURE_DIR)
 	./bin/compare-diarizer-linux $(COMPARE_MODEL) $(FIXTURE_DIR)
 

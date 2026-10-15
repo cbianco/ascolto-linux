@@ -31,6 +31,12 @@ running `make -f Makefile` selects the Linux build even on macOS.
 Build outputs are host-specific; use separate checkouts when switching operating
 systems with a shared filesystem.
 
+The native build compiles each source once into `build/macos`, tracks header
+dependencies, and repackages the app only when its inputs change. Offline
+simulation, WAV utilities, acoustic rooms and queue verification are linked into
+the harness rather than the shipped app. `make clean` removes native build
+objects and binaries.
+
 The macOS dependency target downloads the Apple Silicon Needle library and
 Whistle model on first use. They remain outside Git. The app bundle is
 `bin/Ascolto.app` and resolves its model relative to the executable when launched

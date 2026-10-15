@@ -1,16 +1,15 @@
 #define _POSIX_C_SOURCE 200809L
+#include "ascolto/filesystem.h"
 #include "ascolto/core.h"
 #include "ascolto/json.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <libgen.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -18,23 +17,6 @@ uint64_t ascolto_monotonic_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)(ts.tv_nsec / 1000000ULL);
-}
-
-static void mkdir_recursive(const char *dir_path) {
-    if (!dir_path || !*dir_path) return;
-    char tmp[512];
-    snprintf(tmp, sizeof(tmp), "%s", dir_path);
-    size_t len = strlen(tmp);
-    if (len == 0) return;
-    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            mkdir(tmp, 0755);
-            *p = '/';
-        }
-    }
-    mkdir(tmp, 0755);
 }
 
 static void format_time_mmss(double sec, char *out, size_t cap) {
@@ -63,7 +45,7 @@ static void add_recent_file(ascolto_core_t *core, const char *path) {
 
 static void scan_existing_transcripts(ascolto_core_t *core) {
     if (!core || !core->config.output_dir[0]) return;
-    mkdir_recursive(core->config.output_dir);
+    ascolto_mkdir_p(core->config.output_dir);
     DIR *dir = opendir(core->config.output_dir);
     if (!dir) return;
     struct dirent *ent;
@@ -122,25 +104,14 @@ static void process_and_commit_utterance_unlocked(
     float turn_db = ascolto_audio_rms_db(pcm, (int)num_samples);
     bool recent_sys = core->last_sys_voiced_sample >= 0 &&
         core->vad[ASCOLTO_CHANNEL_SYS].total_samples_processed - core->last_sys_voiced_sample < 35200;
-    float overlap = core->mic_turn_frames ? (float)core->mic_sys_frames / core->mic_turn_frames : 0;
-    bool interruption = core->mic_sys_frames >= 3 && turn_db >= core->mic_sys_peak + 1.0f;
-    if (channel == ASCOLTO_CHANNEL_MIC) {
-        core->mic_turn_frames = core->mic_sys_frames = 0;
-        core->mic_sys_peak = -100;
-    }
+    ascolto_mic_activity_t activity = core->echo.mic;
+    if (channel == ASCOLTO_CHANNEL_MIC) activity = ascolto_mic_activity_take(&core->echo.mic);
     bool reject = ascolto_transcript_is_noise(wres.text, 0, 1.0f, channel, turn_db, recent_sys);
-    if (channel == ASCOLTO_CHANNEL_MIC) {
-        for (unsigned i = 0; i < core->recent_sys_count && i < 8; i++) {
-            ascolto_echo_turn_t *turn = &core->recent_sys[i];
-            if (ascolto_echo_turn_matches(wres.text, start_sec, end_sec, turn_db, overlap, interruption,
-                                         turn->text, turn->start, turn->end, turn->rms_db)) reject = true;
-        }
-    }
+    if (channel == ASCOLTO_CHANNEL_MIC &&
+        ascolto_echo_filter_matches(&core->echo, wres.text, start_sec, end_sec, turn_db, &activity)) reject = true;
     if (reject) { ascolto_whistle_result_free(&wres); return; }
     if (channel == ASCOLTO_CHANNEL_SYS) {
-        ascolto_echo_turn_t *turn = &core->recent_sys[core->recent_sys_count++ % 8];
-        turn->start = start_sec; turn->end = end_sec; turn->rms_db = turn_db;
-        snprintf(turn->text, sizeof(turn->text), "%.511s", wres.text);
+        ascolto_echo_filter_remember(&core->echo, wres.text, start_sec, end_sec, turn_db);
     }
 
     float emb[ASCOLTO_EMBED_DIM];
@@ -259,106 +230,6 @@ void ascolto_core_flush_channel(ascolto_core_t *core, ascolto_channel_t channel)
     pthread_mutex_unlock(&core->processing_mutex);
 }
 
-static const char *recap_language_name(const char *code) {
-    static const struct { const char *code; const char *name; } map[] = {
-        {"en", "English"}, {"es", "Spanish"}, {"fr", "French"}, {"de", "German"},
-        {"nl", "Dutch"}, {"pl", "Polish"}
-    };
-    for (size_t i = 0; code && i < sizeof(map) / sizeof(map[0]); i++) {
-        if (strcmp(code, map[i].code) == 0) return map[i].name;
-    }
-    return "Italian";
-}
-
-static int spawn_recap(ascolto_core_t *core, const char *md_path, bool mp3_only) {
-    if (!core) return -1;
-    char dir[512], lang[16], recap_lang[8], tts_lang[8], keywords[1024];
-    bool tts;
-
-    pthread_mutex_lock(&core->mutex);
-    snprintf(dir, sizeof(dir), "%s", (md_path && *md_path) ? md_path : core->current_md_path);
-    snprintf(lang, sizeof(lang), "%s", core->config.language);
-    snprintf(recap_lang, sizeof(recap_lang), "%s", core->config.recap_lang);
-    snprintf(tts_lang, sizeof(tts_lang), "%s", core->config.tts_lang);
-    snprintf(keywords, sizeof(keywords), "%s", core->config.keywords);
-    tts = core->config.recap_tts;
-    pthread_mutex_unlock(&core->mutex);
-
-    /* Only per-call folders are supported: <dir>/transcript.md */
-    const char *suffix = "/transcript.md";
-    size_t len = strlen(dir), slen = strlen(suffix);
-    if (len <= slen || strcmp(dir + len - slen, suffix) != 0) return -1;
-    dir[len - slen] = '\0';
-
-    char exe[512];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    if (n <= 0) return -1;
-    exe[n] = '\0';
-    char exe_copy[512];
-    snprintf(exe_copy, sizeof(exe_copy), "%s", exe);
-    char script[640], flac2wav[640], python[640];
-    snprintf(script, sizeof(script), "%s/../scripts/recap.py", dirname(exe));
-    snprintf(python, sizeof(python), "%s/../.venv/bin/python3", dirname(exe));
-    if (access(python, X_OK)) snprintf(python, sizeof(python), "python3");
-    snprintf(flac2wav, sizeof(flac2wav), "%s/flac2wav", dirname(exe_copy));
-
-    const char *home = getenv("HOME");
-    char log_path[640];
-    snprintf(log_path, sizeof(log_path), "%s/.local/share/ascolto/recap.log", (home && *home) ? home : "/tmp");
-
-    char recap_name[32], tts_name[32];
-    snprintf(recap_name, sizeof(recap_name), "%s", recap_language_name(recap_lang));
-    snprintf(tts_name, sizeof(tts_name), "%s", recap_language_name(tts_lang));
-
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        if (fork() != 0) _exit(0); /* double fork: the daemon never has to reap the pipeline */
-        setsid();
-        int devnull = open("/dev/null", O_RDONLY);
-        int logfd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0600);
-        if (devnull >= 0) dup2(devnull, STDIN_FILENO);
-        if (logfd >= 0) { dup2(logfd, STDOUT_FILENO); dup2(logfd, STDERR_FILENO); }
-        const char *argv[28];
-        int a = 0;
-        argv[a++] = python;
-        argv[a++] = script;
-        argv[a++] = "--dir";
-        argv[a++] = dir;
-        argv[a++] = "--language";
-        argv[a++] = lang;
-        argv[a++] = "--recap-lang";
-        argv[a++] = recap_name;
-        argv[a++] = "--tts-lang";
-        argv[a++] = tts_name;
-        argv[a++] = "--keywords";
-        argv[a++] = keywords;
-        argv[a++] = "--flac2wav";
-        argv[a++] = flac2wav;
-        if (mp3_only) argv[a++] = "--mp3-only";
-        else if (tts) argv[a++] = "--tts";
-        argv[a] = NULL;
-        execvp(python, (char *const *)argv);
-        _exit(127);
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
-
-    char ev[640];
-    snprintf(ev, sizeof(ev), "\"dir\":\"%.480s\",\"tts\":%s,\"mp3_only\":%s", dir,
-             (tts || mp3_only) ? "true" : "false", mp3_only ? "true" : "false");
-    ascolto_obs_emit(&core->obs, "recap_started", ev);
-    return 0;
-}
-
-int ascolto_core_run_recap(ascolto_core_t *core, const char *md_path) {
-    return spawn_recap(core, md_path, false);
-}
-
-int ascolto_core_make_mp3(ascolto_core_t *core, const char *md_path) {
-    return spawn_recap(core, md_path, true);
-}
-
 static int start_session_unlocked(ascolto_core_t *core, ascolto_state_t target_state, const char *reason) {
     char mic_dev[128], sys_dev[128];
 
@@ -369,7 +240,7 @@ static int start_session_unlocked(ascolto_core_t *core, ascolto_state_t target_s
         return result;
     }
 
-    mkdir_recursive(core->config.output_dir);
+    ascolto_mkdir_p(core->config.output_dir);
     time_t now = time(NULL);
     struct tm tmv;
     localtime_r(&now, &tmv);
@@ -379,7 +250,7 @@ static int start_session_unlocked(ascolto_core_t *core, ascolto_state_t target_s
     core->session_id++;
     snprintf(core->current_session_dir, sizeof(core->current_session_dir),
              "%.400s/call_%s_%llu", core->config.output_dir, ts_str, (unsigned long long)core->session_id);
-    mkdir_recursive(core->current_session_dir);
+    ascolto_mkdir_p(core->current_session_dir);
     snprintf(core->current_md_path, sizeof(core->current_md_path), "%.480s/transcript.md", core->current_session_dir);
     snprintf(core->current_jsonl_path, sizeof(core->current_jsonl_path), "%.480s/transcript.jsonl", core->current_session_dir);
 
@@ -427,11 +298,8 @@ static int start_session_unlocked(ascolto_core_t *core, ascolto_state_t target_s
         core->session_audio_sec[ch] = 0.0;
     }
 
-    core->sys_env_frames = 0;
+    ascolto_echo_filter_reset(&core->echo);
     core->last_sys_voiced_sample = -1;
-    core->mic_turn_frames = core->mic_sys_frames = 0;
-    core->mic_sys_peak = -100;
-    core->recent_sys_count = 0;
     core->session_start_ms = ascolto_monotonic_ms();
     core->session_paused_accum_ms = 0;
     core->pause_start_ms = 0;
@@ -759,68 +627,40 @@ int ascolto_core_set_language(ascolto_core_t *core, const char *lang) {
     return 0;
 }
 
-int ascolto_core_set_mic_device(ascolto_core_t *core, const char *dev) {
-    if (!core || !dev) return -1;
-    bool restart_cap = false;
-    char mic_dev[128], sys_dev[128];
-
+static int set_capture_device(ascolto_core_t *core, ascolto_channel_t channel, const char *device) {
+    if (!core || !device) return -1;
+    char mic[128], sys[128], event[256];
     pthread_mutex_lock(&core->mutex);
-    snprintf(core->config.mic_device, sizeof(core->config.mic_device), "%s", dev);
-    snprintf(mic_dev, sizeof(mic_dev), "%s", core->config.mic_device);
-    snprintf(sys_dev, sizeof(sys_dev), "%s", core->config.sys_device);
+    bool is_mic = channel == ASCOLTO_CHANNEL_MIC;
+    char *selected = is_mic ? core->config.mic_device : core->config.sys_device;
+    snprintf(selected, sizeof(core->config.mic_device), "%s", device);
+    snprintf(mic, sizeof(mic), "%s", core->config.mic_device);
+    snprintf(sys, sizeof(sys), "%s", core->config.sys_device);
     ascolto_config_save(&core->config, NULL);
-    restart_cap = (core->state != ASCOLTO_STATE_IDLE);
-    char ev[256];
-    snprintf(ev, sizeof(ev), "\"mic_device\":\"%s\"", core->config.mic_device);
-    ascolto_obs_emit(&core->obs, "config_mic_changed", ev);
+    bool restart = core->state != ASCOLTO_STATE_IDLE;
+    snprintf(event, sizeof(event), "\"%s_device\":\"%s\"", is_mic ? "mic" : "sys", selected);
+    ascolto_obs_emit(&core->obs, is_mic ? "config_mic_changed" : "config_sys_changed", event);
     pthread_mutex_unlock(&core->mutex);
 
-    if (restart_cap) {
+    if (restart) {
         core->audio.stop_capture(&core->audio);
-        int capture_result = core->audio.start_capture(&core->audio, mic_dev, sys_dev);
-    pthread_mutex_lock(&core->mutex);
-    core->session_starting = false;
-    pthread_cond_broadcast(&core->session_condition);
-    pthread_mutex_unlock(&core->mutex);
-    if (capture_result) {
-        ascolto_core_stop(core);
-        return capture_result;
-    }
+        int result = core->audio.start_capture(&core->audio, mic, sys);
+        pthread_mutex_lock(&core->mutex);
+        core->session_starting = false;
+        pthread_cond_broadcast(&core->session_condition);
+        pthread_mutex_unlock(&core->mutex);
+        if (result) { ascolto_core_stop(core); return result; }
     }
     ascolto_tray_update(&core->tray);
     return 0;
 }
 
-int ascolto_core_set_sys_device(ascolto_core_t *core, const char *dev) {
-    if (!core || !dev) return -1;
-    bool restart_cap = false;
-    char mic_dev[128], sys_dev[128];
+int ascolto_core_set_mic_device(ascolto_core_t *core, const char *device) {
+    return set_capture_device(core, ASCOLTO_CHANNEL_MIC, device);
+}
 
-    pthread_mutex_lock(&core->mutex);
-    snprintf(core->config.sys_device, sizeof(core->config.sys_device), "%s", dev);
-    snprintf(mic_dev, sizeof(mic_dev), "%s", core->config.mic_device);
-    snprintf(sys_dev, sizeof(sys_dev), "%s", core->config.sys_device);
-    ascolto_config_save(&core->config, NULL);
-    restart_cap = (core->state != ASCOLTO_STATE_IDLE);
-    char ev[256];
-    snprintf(ev, sizeof(ev), "\"sys_device\":\"%s\"", core->config.sys_device);
-    ascolto_obs_emit(&core->obs, "config_sys_changed", ev);
-    pthread_mutex_unlock(&core->mutex);
-
-    if (restart_cap) {
-        core->audio.stop_capture(&core->audio);
-        int capture_result = core->audio.start_capture(&core->audio, mic_dev, sys_dev);
-    pthread_mutex_lock(&core->mutex);
-    core->session_starting = false;
-    pthread_cond_broadcast(&core->session_condition);
-    pthread_mutex_unlock(&core->mutex);
-    if (capture_result) {
-        ascolto_core_stop(core);
-        return capture_result;
-    }
-    }
-    ascolto_tray_update(&core->tray);
-    return 0;
+int ascolto_core_set_sys_device(ascolto_core_t *core, const char *device) {
+    return set_capture_device(core, ASCOLTO_CHANNEL_SYS, device);
 }
 
 int ascolto_core_set_sensitivity(ascolto_core_t *core, ascolto_sensitivity_t sens) {
@@ -914,13 +754,13 @@ void ascolto_core_ingest_audio(ascolto_core_t *core, ascolto_channel_t channel,
         const float *frame = padding ? zeros : pcm + offset;
         if (recorder) ascolto_audio_recorder_write(recorder, frame, (size_t)step);
         float db = ascolto_audio_rms_db(frame, step);
-        float reference;
+        float reference = -100.0f;
         bool active = false;
         if (channel == ASCOLTO_CHANNEL_SYS) {
-            core->sys_env_db[core->sys_env_frames++ % ASCOLTO_SYS_ENV_HISTORY] = db;
+            core->echo.sys_db[core->echo.sys_frames++ % ASCOLTO_SYS_ENV_HISTORY] = db;
             if (db >= -36.5f) core->last_sys_voiced_sample = core->vad[channel].total_samples_processed + step;
         } else {
-            active = ascolto_bleed_reference(core->sys_env_db, core->sys_env_frames,
+            active = ascolto_bleed_reference(core->echo.sys_db, core->echo.sys_frames,
                 core->vad[channel].total_samples_processed + step, core->vad[ASCOLTO_CHANNEL_SYS].total_samples_processed,
                 &reference);
         }
@@ -929,16 +769,7 @@ void ascolto_core_ingest_audio(ascolto_core_t *core, ascolto_channel_t channel,
         bool bleed = channel == ASCOLTO_CHANNEL_MIC && active && db < reference + 3.5f;
         ascolto_online_vad_feed(&core->vad[channel], bleed ? zeros : frame, step, on_vad_turn, core);
         if (channel == ASCOLTO_CHANNEL_MIC && !bleed) {
-            if (core->vad[channel].in_speech) {
-                core->mic_turn_frames++;
-                if (active) {
-                    core->mic_sys_frames++;
-                    if (reference > core->mic_sys_peak) core->mic_sys_peak = reference;
-                }
-            } else {
-                core->mic_turn_frames = core->mic_sys_frames = 0;
-                core->mic_sys_peak = -100;
-            }
+            ascolto_mic_activity_track(&core->echo.mic, core->vad[channel].in_speech, active, reference);
         }
         if (padding) gap -= step;
         else offset += (size_t)step;

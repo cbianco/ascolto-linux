@@ -8,8 +8,10 @@ CFLAGS   := -std=c11 -Wall -Wextra -O2 -g -MMD -MP -Iinclude -Ithird_party/whist
 LDFLAGS  := third_party/whistle/libneedle.so -Wl,-rpath,'$$ORIGIN/../third_party/whistle' $(GLIB_LIBS) $(AV_LIBS) -ldl -lpthread -lm
 
 CORE_SRCS := \
+	src/filesystem.c \
 	src/types_config.c \
 	src/observability.c \
+	src/control.c \
 	src/whistle_engine.c \
 	src/diarizer.c \
 	src/capture_buffer.c \
@@ -18,6 +20,7 @@ CORE_SRCS := \
 	src/audio_backend.c \
 	src/audio_recorder.c \
 	src/tray_ui.c \
+	src/recap.c \
 	src/core.c
 
 CORE_OBJS := $(patsubst src/%.c,build/%.o,$(CORE_SRCS))
