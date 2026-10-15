@@ -1,8 +1,8 @@
 """Local artifact adaptation and mocked cloud contracts; never uses real credentials."""
-import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -10,9 +10,8 @@ import wave
 
 import numpy as np
 
-SPEC = importlib.util.spec_from_file_location("recap", Path(__file__).resolve().parents[1] / "scripts/recap.py")
-recap = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(recap)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import recap
 
 
 class RecapTests(unittest.TestCase):

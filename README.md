@@ -1,5 +1,15 @@
 # ascolto
 
+Native Settings now keeps recap and optional post-call transcription choices
+separate. SQLite is authoritative for settings, local sessions and AI job history;
+legacy files receive immutable backups during adoption. Whistle remains the live
+engine. See [the native UI](docs/UI.md), [storage](docs/DATABASE.md) and
+[AI task contracts](docs/AI_WORKFLOWS.md). Run `make recap-deps` before packaging
+the bundled Python runtime, and `make test-integration` for application wiring.
+Linux native builds also require SQLite development headers (`libsqlite3-dev` on
+Debian/Ubuntu).
+
+
 This personal fork tracks [Voloire/ascolto-linux](https://github.com/Voloire/ascolto-linux)
 and includes the existing native macOS application. `make` selects the host platform
 through `GNUmakefile`; Linux source paths and its native `Makefile` are preserved.

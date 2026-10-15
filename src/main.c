@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
             snprintf(cfg.config_path, sizeof(cfg.config_path), "%s", argv[i + 1]);
         }
     }
-    ascolto_config_load(&cfg, cfg.config_path);
+    if (ascolto_config_load(&cfg, cfg.config_path) == -1) return 1;
 
     bool use_mock_audio = false;
     for (int i = 1; i < argc; i++) {

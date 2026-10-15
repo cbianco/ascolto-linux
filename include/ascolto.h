@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "ascolto/storage.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -238,6 +239,8 @@ typedef struct {
     char last_speaker[32];
     char last_utterance_text[256];
     char current_md_path[512];
+    int storage_error;
+    int settings_error;
     int utterances;
     int remote_speakers;
     double session_start_s;
@@ -249,6 +252,9 @@ typedef struct {
 typedef struct {
     bool save_audio;
     bool meta_written;
+    int64_t database_session;
+    ascolto_storage_writer_t storage_writer;
+    int storage_error;
     char md_path[512];
     char jsonl_path[512];
     char mic_raw_path[512];
@@ -269,6 +275,7 @@ typedef struct {
     ascolto_macos_capture_t* capture;
     uint64_t session_generation;
     ascolto_config_t config;
+    int settings_error;
     ascolto_whistle_t* whistle;
     ascolto_diarizer_t diarizer;
     ascolto_online_vad_t vad_mic;

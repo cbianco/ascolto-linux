@@ -251,7 +251,7 @@ static int test_e2e_multispeaker_call_and_ipc_observability(void) {
 
     /* 3. Verify Tray UI state reflects active recording */
     ASSERT_TRUE(send_ipc_cmd(cfg.control_socket, "GET_TRAY_STATE", reply, sizeof(reply)) == 0, "IPC GET_TRAY_STATE failed");
-    ASSERT_TRUE(strstr(reply, "\"recording\":true") != NULL && strstr(reply, "REC ") != NULL, "Tray UI should show REC timer");
+    ASSERT_TRUE(strstr(reply, "\"recording\":true") != NULL && strstr(reply, "ascolto-recording-symbolic") != NULL, "Tray UI should show the recording gesture");
 
     /* 4. Inject a 5-turn multi-speaker conversation across MIC and SYS channels */
     ASSERT_TRUE(send_ipc_cmd(cfg.control_socket,
@@ -268,7 +268,7 @@ static int test_e2e_multispeaker_call_and_ipc_observability(void) {
     ASSERT_TRUE(send_ipc_cmd(cfg.control_socket, "PAUSE", reply, sizeof(reply)) == 0, "IPC PAUSE failed");
     ASSERT_TRUE(strstr(reply, "\"state\":\"PAUSED\"") != NULL, "Expected PAUSED state");
     ASSERT_TRUE(send_ipc_cmd(cfg.control_socket, "GET_TRAY_STATE", reply, sizeof(reply)) == 0, "IPC GET_TRAY_STATE failed");
-    ASSERT_TRUE(strstr(reply, "\"paused\":true") != NULL && strstr(reply, "PAUSA ") != NULL, "Tray should show PAUSA");
+    ASSERT_TRUE(strstr(reply, "\"paused\":true") != NULL && strstr(reply, "ascolto-paused-symbolic") != NULL, "Tray should show the paused ear");
     ASSERT_TRUE(send_ipc_cmd(cfg.control_socket, "RESUME", reply, sizeof(reply)) == 0, "IPC RESUME failed");
     ASSERT_TRUE(strstr(reply, "\"state\":\"RECORDING_AUTO\"") != NULL, "Expected resume to RECORDING_AUTO");
 

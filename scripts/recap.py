@@ -15,6 +15,7 @@ Needs OPENAI_API_KEY in the environment.
 import argparse
 import contextlib
 import fcntl
+import hashlib
 from pathlib import Path
 import concurrent.futures as futures
 import difflib
@@ -27,6 +28,8 @@ import sys
 import tempfile
 import time
 import wave
+
+from ascolto_files import atomic_text
 
 import numpy as np
 import requests
@@ -120,13 +123,13 @@ def fmt_time(sec):
 
 
 def read_wav(path):
-    with wave.open(path, "rb") as w:
+    with wave.open(str(path), "rb") as w:
         assert w.getnchannels() == 1 and w.getframerate() == SAMPLE_RATE and w.getsampwidth() == 2
         return np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
 
 
 def write_wav(path, samples):
-    with wave.open(path, "wb") as w:
+    with wave.open(str(path), "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(SAMPLE_RATE)
@@ -348,18 +351,6 @@ def notify(title, body):
         pass
 
 
-def atomic_text(path, text):
-    """Publish a complete artifact, with owner-only permissions."""
-    path = Path(path)
-    fd, temporary = tempfile.mkstemp(prefix=".ascolto-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(text)
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
 
 def prepare_archive(archive, directory, ffmpeg="ffmpeg"):
     """Adapt the macOS stereo archive, preserving every original local artifact."""
@@ -406,7 +397,11 @@ def parse_args(argv=None):
     ap = argparse.ArgumentParser()
     source = ap.add_mutually_exclusive_group(required=True)
     source.add_argument("--dir", help="Linux per-call folder")
+    source.add_argument("--transcript", help="local transcript for the explicitly selected AI provider; text only")
     source.add_argument("--archive", help="macOS stereo M4A archive (left MIC, right SYS)")
+    ap.add_argument("--ai-config", help="native app configuration path for AI provider settings")
+    ap.add_argument("--automatic", action="store_true", help="run only when automatic text recaps are enabled")
+    ap.add_argument("--text-only", action="store_true", help="generate a text recap without uploading audio")
     ap.add_argument("--prepare-only", action="store_true", help="adapt artifacts locally; no cloud or credentials")
     ap.add_argument("--ffmpeg", default="ffmpeg")
     ap.add_argument("--language", default="it")
@@ -422,7 +417,39 @@ def parse_args(argv=None):
     return ap.parse_args(argv)
 
 
+def run_text(args):
+    # The provider path reads only a finished local transcript. Audio and legacy
+    # STT/TTS credentials are never consulted, even when an archive exists.
+    from ai_providers import ProviderManager, ProviderError
+    if not args.ai_config:
+        raise ValueError("--ai-config is required with --transcript")
+    manager = ProviderManager(args.ai_config)
+    with manager.locked():
+        settings = manager.load()
+        if args.automatic and not settings.get("automatic_recaps", False):
+            return 0
+    transcript_path = Path(args.transcript)
+    if transcript_path.stat().st_size > 2 * 1024 * 1024:
+        raise ValueError("The transcript exceeds the text recap size limit")
+    transcript = transcript_path.read_text(encoding="utf-8")
+    if not transcript.strip():
+        return 0
+    prompt = RECAP_PROMPT.format(lang=settings.get("language", "Italian"), glossary="",
+                                spoken="", transcript=scrub(transcript))
+    try:
+        text, model = manager.complete(RECAP_SYSTEM, prompt,
+                                      hashlib.sha256(str(transcript_path.resolve()).encode()).hexdigest())
+        atomic_text(Path(args.dir) / "recap.md", "# Recap\n\n" + text + "\n")
+        log("text recap completed")
+        return 0
+    except ProviderError as error:
+        log(str(error))  # Only our sanitized error text; never a provider response.
+        return 1
+
+
 def run(args):
+    if args.transcript:
+        return run_text(args)
     if args.language == "auto":
         args.language = None
 
@@ -508,6 +535,11 @@ def run(args):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.transcript:
+        source = Path(args.transcript).resolve()
+        args.dir = str(source.parent if source.name == "transcript.md" else source.with_suffix(""))
+        if source.name != "transcript.md":
+            args.dir += "_recap"
     if args.archive:
         args.dir = str(Path(args.archive).resolve().with_suffix("")) + "_recap"
     try:

@@ -17,6 +17,10 @@ typedef struct {
     char label[64];
     char status_text[128];
     bool menu_recording_enabled;
+    bool menu_stopping;
+    int storage_error;
+    char session_app[128];
+    char latest_phrase[256];
     bool menu_paused;
     bool menu_auto_mic_checked;
     bool menu_save_audio_checked;
@@ -27,6 +31,7 @@ typedef struct {
     char selected_sys[128];
     ascolto_sensitivity_t selected_sensitivity;
     char keywords_summary[256];
+    char settings_keywords[1024];
     size_t recent_files_count;
     char recent_files[ASCOLTO_MAX_RECENT_FILES][512];
 } ascolto_tray_snapshot_t;
@@ -48,6 +53,8 @@ void ascolto_tray_step_iteration(ascolto_tray_ui_t *ui);
 void ascolto_tray_open_transcripts_folder(ascolto_tray_ui_t *ui);
 void ascolto_tray_open_session_folder(ascolto_tray_ui_t *ui);
 void ascolto_tray_destroy(ascolto_tray_ui_t *ui);
+/* Join menu mutations before shutting down capture and session resources. */
+void ascolto_tray_wait_actions(ascolto_tray_ui_t *ui);
 
 #ifdef __cplusplus
 }

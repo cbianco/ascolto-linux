@@ -36,6 +36,15 @@ tests/*.sample.txt
 tests/*-hang.txt
 tests/audio-feedback.json
 __pycache__/
+*.py[cod]
+
+# Local credentials and runtime databases
+.env
+.env.*
+!.env.example
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 
 # Optional isolated Python environment for recap dependencies
 .venv/

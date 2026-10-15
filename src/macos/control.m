@@ -36,7 +36,7 @@ static NSDictionary *status(ascolto_live_app_t *app) {
         @"save_audio": @(snapshot.config.save_audio), @"cloud_recap": @(snapshot.config.cloud_recap),
         @"recap_tts": @(snapshot.config.recap_tts), @"language": safe_string(snapshot.config.language),
         @"utterances": @(snapshot.utterances), @"remote_speakers": @(snapshot.remote_speakers),
-        @"mic_samples": @(snapshot.mic_samples), @"transcript": safe_string(snapshot.current_md_path)};
+        @"settings_error": @(snapshot.settings_error), @"storage_error": @(snapshot.storage_error), @"mic_samples": @(snapshot.mic_samples), @"transcript": safe_string(snapshot.current_md_path)};
 }
 
 static NSDictionary *execute(AscoltoControlServer *server, NSString *command, NSString *argument) {

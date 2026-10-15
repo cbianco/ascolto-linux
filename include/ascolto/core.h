@@ -2,6 +2,7 @@
 #define ASCOLTO_CORE_H
 
 #include "ascolto/types.h"
+#include "ascolto/storage.h"
 #include "ascolto/audio_processing.h"
 #include "ascolto/diarizer.h"
 #include "ascolto/whistle_engine.h"
@@ -26,6 +27,9 @@ struct ascolto_core {
     uint64_t last_mic_change_ms;
 
     uint64_t session_id;
+    int64_t database_session;
+    ascolto_storage_writer_t storage_writer;
+    int storage_error;
     uint64_t session_start_ms;
     uint64_t session_paused_accum_ms;
     uint64_t pause_start_ms;
@@ -58,6 +62,7 @@ struct ascolto_core {
     ascolto_obs_t obs;
 
     pthread_mutex_t processing_mutex;
+    pthread_mutex_t config_mutex;
     pthread_mutex_t mutex;
     pthread_cond_t session_condition;
     bool session_starting;

@@ -108,13 +108,15 @@ int main(void) {
     ascolto_core_stop(core);
     if (core->vad[ASCOLTO_CHANNEL_MIC].total_samples_processed != 16000) failures++;
     JsonParser *parser = json_parser_new();
-    if (!json_parser_load_from_file(parser, core->current_jsonl_path, NULL)) failures++;
-    else {
-        JsonObject *object = json_node_get_object(json_parser_get_root(parser));
-        if (!object || strcmp(json_object_get_string_member(object, "text"), text) ||
-            json_object_get_double_member(object, "start_sec") != 0.5) failures++;
+    FILE *trace=fopen(core->current_jsonl_path,"r");char line[8192];bool found=false;
+    while(trace&&fgets(line,sizeof(line),trace)){
+        if(!json_parser_load_from_data(parser,line,-1,NULL)){failures++;continue;}
+        JsonObject *object=json_node_get_object(json_parser_get_root(parser));
+        if(!object||!json_object_has_member(object,"text"))continue;
+        found=true;
+        if(strcmp(json_object_get_string_member(object,"text"),text)||json_object_get_double_member(object,"start_sec")!=0.5)failures++;
     }
-    g_object_unref(parser);
+    if(trace)fclose(trace);if(!found)failures++;g_object_unref(parser);
     ascolto_core_destroy(core);
     free(core);
     pthread_cond_destroy(&drain.condition);

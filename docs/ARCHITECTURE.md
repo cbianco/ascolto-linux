@@ -13,8 +13,9 @@ Native MIC/SYS capture
     -> one audio consumer (SYS before MIC)
     -> energy gate and streaming VAD
     -> Whistle transcription and speaker identification
-    -> transcript writer and optional audio archive
-    -> optional Python recap worker after archive completion
+    -> committed SQLite transcript + Markdown/JSONL export
+    -> optional text recap from local transcript
+    -> optional audio archive, then separately opted-in cloud STT/legacy worker
 ```
 
 Both channels carry 16 kHz mono float PCM. A processing frame contains 320 samples
@@ -32,6 +33,13 @@ capture drains every queued sample before transcript/audio resources close.
   filtering, MIC activity statistics and recent SYS turn history. Both controllers
   use the same echo state and matching rules; native VAD tuning stays explicit.
 - `filesystem.c`: directory and parent-directory creation.
+- `database.c` / `storage.c`: native settings, committed recording data, copied
+  pending turns, transcript exports and durable outbox.
+- `scripts/ascolto_database.py` / `ascolto_runtime.py`: shared schema, legacy
+  adoption/recovery and AI settings/catalog/job writes.
+- `scripts/ai_providers.py` / `ai_workflows.py`: secure credentials/provider calls
+  and independently selected text recap/cloud transcription tasks.
+- `scripts/ascolto_files.py`: durable owner-only text publication for Python workers.
 - `scripts/recap.py`: optional cloud transcription, recap and TTS. It adapts Linux
   FLAC folders and macOS stereo M4A archives without replacing local artifacts.
 
@@ -47,7 +55,7 @@ capture drains every queued sample before transcript/audio resources close.
 | Control protocol | `control.c` | `macos/control.m` |
 | Socket transport and telemetry | `observability.c` | `macos/control.m`, `diagnostics.c` |
 | UI | `tray_ui.c` | `menubar_macos.m` |
-| Settings | `types_config.c`, INI | `config.c`, JSON and keywords file |
+| Settings UI and adapters | `linux/settings.inc`, `types_config.c` | `macos/settings.m`, `config.c` |
 | Engine and diarization | `whistle_engine.c`, `diarizer.c` | Corresponding files under `macos/` |
 
 The engine/diarizer API families have colliding names and different contracts;
@@ -72,7 +80,8 @@ remains independent and uses the controller's synchronized entry points.
   an immutable device cache, and menu construction reads only that cache.
 - Menu action completion and timers use common run-loop modes.
 - Compression publishes completed archives atomically. Shutdown waits for archive
-  jobs off the UI thread. Recap is opt-in and starts after archive publication.
+  jobs off the UI thread. Text recap needs committed text, including without
+  audio saving; cloud STT needs a ready original archive and separate upload opt-in.
 
 ## Offline tools and verification
 
@@ -85,7 +94,8 @@ The macOS app excludes WAV utilities, the simulated monitor, offline session/VAD
 acoustic rooms and the deterministic queue verifier. The harness links these
 modules explicitly. Linux keeps its mock/inspection CLI commands available.
 
-Use `make test`, `make test-portable`, `make test-recap`, and
+Use `make test`, `make test-portable`, `make test-integration`, `make test-ai`,
+`make test-recap`, and
 `make compare-diarizers` for the relevant suites. `make test-capture` is the
 separate opt-in hardware check. Acoustic fixtures and mocked text hints verify
 pipeline behavior; they do not establish recognition accuracy on arbitrary calls.

@@ -30,7 +30,7 @@ FIXTURE_DIR ?= tests/fixtures
 compare-diarizers: deps
 	@mkdir -p bin
 	$(CC) -std=c11 -O2 -Wall -Wextra -Iinclude $(COMPARE_HEADERS) -DASCOLTO_COMPARE_MACOS src/macos/diarizer.c src/macos/whistle_engine.c src/wav_audio.c src/audio_processing.c tests/compare_diarizers.c -o bin/compare-diarizer-macos $(COMPARE_NEEDLE) -lpthread -lm
-	$(CC) -std=c11 -O2 -Wall -Wextra -Iinclude $(COMPARE_HEADERS) src/diarizer.c src/whistle_engine.c src/types_config.c src/filesystem.c src/audio_processing.c tests/compare_diarizers.c -o bin/compare-diarizer-linux $(COMPARE_NEEDLE) -lpthread -lm
+	$(CC) -std=c11 -O2 -Wall -Wextra -Iinclude $(COMPARE_HEADERS) src/diarizer.c src/whistle_engine.c src/types_config.c src/filesystem.c src/database.c src/storage.c src/ai_settings.c src/audio_processing.c tests/compare_diarizers.c -o bin/compare-diarizer-linux $(COMPARE_NEEDLE) -lpthread -lm -lsqlite3
 	./bin/compare-diarizer-macos $(COMPARE_MODEL) $(FIXTURE_DIR)
 	./bin/compare-diarizer-linux $(COMPARE_MODEL) $(FIXTURE_DIR)
 
@@ -39,6 +39,25 @@ RECAP_PYTHON ?= $(if $(wildcard .venv/bin/python3),.venv/bin/python3,python3)
 recap-deps:
 	python3 -m venv .venv
 	.venv/bin/python3 -m pip install -r scripts/requirements-recap.txt
+	@touch .venv/.ascolto-runtime-ready
 
 test-recap:
 	$(RECAP_PYTHON) -m unittest discover -s tests -p test_recap.py
+	$(RECAP_PYTHON) -m unittest discover -s tests -p test_ai_workflows.py
+
+.PHONY: test-ai
+test-ai:
+	$(RECAP_PYTHON) -m unittest discover -s tests -p test_ai_providers.py
+
+.PHONY: test-database test-integration
+test-database:
+	python3 scripts/generate_database_schema.py --check
+	@mkdir -p bin
+	$(CC) -std=c11 -Wall -Wextra -Werror -Iinclude src/database.c tests/database_main.c -lsqlite3 -lpthread -o bin/ascolto-database-test
+	./bin/ascolto-database-test
+	$(RECAP_PYTHON) -m unittest discover -s tests -p test_database.py
+
+test-integration: test-database
+	$(CC) -std=c11 -Wall -Wextra -Werror -Iinclude src/database.c src/storage.c src/ai_settings.c src/filesystem.c tests/storage_main.c -lsqlite3 -lpthread -o bin/ascolto-storage-test
+	./bin/ascolto-storage-test
+	$(RECAP_PYTHON) -m unittest discover -s tests -p test_integration.py

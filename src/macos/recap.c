@@ -1,7 +1,8 @@
+#include "ascolto/ai_settings.h"
+#include "ascolto/storage.h"
 #include "ascolto.h"
 #include <errno.h>
 #include <fcntl.h>
-#include <mach-o/dyld.h>
 #include <spawn.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,57 +48,26 @@ static void *reap(void *argument) {
     return NULL;
 }
 
-static int resolve_script(char *output, size_t capacity) {
-    char executable[1024];
-    uint32_t size = sizeof(executable);
-    if (_NSGetExecutablePath(executable, &size)) return -1;
-    char *slash = strrchr(executable, '/');
-    if (!slash) return -1;
-    *slash = '\0';
-    const char *suffixes[] = {"/../Resources/recap.py", "/../scripts/recap.py"};
-    for (unsigned i = 0; i < 2; i++) {
-        snprintf(output, capacity, "%s%s", executable, suffixes[i]);
-        if (!access(output, R_OK)) return 0;
-    }
-    return -1;
-}
-
 int ascolto_recap_start(const ascolto_config_t *config, const char *md_path, bool mp3_only, bool prepare_only) {
-    char archive[1024], script[1400], log_path[1024], keywords[2048];
+    char archive[1024], script[2300], interpreter[2300], log_path[1024], keywords[2048];
     if (!config || !md_path || !md_path[0] || strlen(md_path) >= sizeof(archive) - 4) return -1;
     snprintf(archive, sizeof(archive), "%s", md_path);
     char *suffix = strrchr(archive, '.');
     if (!suffix || strcmp(suffix, ".md")) return -1;
     snprintf(suffix, sizeof(archive) - (size_t)(suffix - archive), ".m4a");
-    if ((!mp3_only && access(archive, R_OK)) || resolve_script(script, sizeof(script))) return -1;
+    if ((!mp3_only && access(archive, R_OK)) || ascolto_ai_worker_paths("recap.py", script, sizeof(script), interpreter, sizeof(interpreter))) return -1;
     snprintf(log_path, sizeof(log_path), "%s", config->config_path);
     char *slash = strrchr(log_path, '/');
     if (slash) snprintf(slash + 1, sizeof(log_path) - (size_t)(slash + 1 - log_path), "recap.log");
     else snprintf(log_path, sizeof(log_path), "recap.log");
     ascolto_config_load_keywords(config, keywords, sizeof(keywords));
-    char interpreter[1600];
-    snprintf(interpreter, sizeof(interpreter), "%s", config->recap_python);
-    if (!strcmp(config->recap_python, "python3")) {
-        char executable[1024];
-        uint32_t size = sizeof(executable);
-        if (!_NSGetExecutablePath(executable, &size)) {
-            char *directory = strrchr(executable, '/');
-            if (directory) {
-                *directory = '\0';
-                const char *suffixes[] = {"/../.venv/bin/python3", "/../../../../.venv/bin/python3"};
-                for (unsigned i = 0; i < 2; i++) {
-                    char candidate[1600];
-                    snprintf(candidate, sizeof(candidate), "%s%s", executable, suffixes[i]);
-                    if (!access(candidate, X_OK)) { snprintf(interpreter, sizeof(interpreter), "%s", candidate); break; }
-                }
-            }
-        }
-    }
+    if (strcmp(config->recap_python, "python3"))
+        snprintf(interpreter, sizeof(interpreter), "%s", config->recap_python);
     char environment_path[4096];
     snprintf(environment_path, sizeof(environment_path), "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:%s", getenv("PATH") ?: "");
-    char *arguments[24] = {"env", environment_path, interpreter,
+    char *arguments[24] = {"env", environment_path, "PYTHONDONTWRITEBYTECODE=1", interpreter, "-B",
         script, "--archive", archive, "--language", (char *)config->language, "--keywords", keywords, NULL};
-    int next = 10;
+    int next = 12;
     if (mp3_only) arguments[next++] = "--mp3-only";
     if (prepare_only) arguments[next++] = "--prepare-only";
     if (config->recap_tts) arguments[next++] = "--tts";
@@ -133,10 +103,13 @@ static void *finalize_archive(void *argument) {
     if (!result) result = rename(temporary, job->archive);
     if (!result) {
         chmod(job->archive, 0600);
-        unlink(job->mic);
-        unlink(job->sys);
-        if (job->config.cloud_recap) result = ascolto_recap_start(&job->config, job->md, false, false);
-    } else unlink(temporary);
+        result=ascolto_storage_archive(job->config.config_path,job->md,job->archive,"ready");
+        if(!result){
+            unlink(job->mic);unlink(job->sys);
+            ascolto_ai_task_start(job->config.config_path,job->md,"automatic_audio");
+        }
+        if (!result && job->config.cloud_recap && !ascolto_ai_automatic_enabled(job->config.config_path)) result = ascolto_recap_start(&job->config, job->md, false, false);
+    } else { unlink(temporary); ascolto_storage_archive(job->config.config_path,job->md,job->archive,"failed"); }
     ascolto_diagnostic("Archive finalization completed result=%d", result);
     free(job);
     pthread_mutex_lock(&archive_mutex);

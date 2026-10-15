@@ -1,5 +1,6 @@
 #include "ascolto.h"
 #include "macos/transcript.h"
+#include "ascolto/storage.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -48,6 +49,8 @@ static void publish_snapshot_unlocked(ascolto_live_app_t* app) {
     memcpy(snapshot->last_speaker, app->last_speaker, sizeof(snapshot->last_speaker));
     memcpy(snapshot->last_utterance_text, app->last_utterance_text, sizeof(snapshot->last_utterance_text));
     memcpy(snapshot->current_md_path, app->files.md_path, sizeof(snapshot->current_md_path));
+    snapshot->settings_error = app->settings_error;
+    snapshot->storage_error = app->files.storage_error;
     snapshot->utterances = app->session_utterance_count;
     snapshot->remote_speakers = app->diarizer.num_speakers;
     snapshot->session_start_s = app->session_start_epoch_s;
@@ -164,8 +167,7 @@ int ascolto_live_app_init(ascolto_live_app_t* app, ascolto_whistle_t* whistle, c
     pthread_mutex_init(&app->snapshot_lock, NULL);
 
     ascolto_config_init_defaults(&app->config);
-    ascolto_config_load(&app->config, config_path);
-    ascolto_config_save(&app->config, config_path);
+    if (ascolto_config_load(&app->config, config_path) == -1 || ascolto_config_save(&app->config, config_path)) return -1;
 
     app->whistle = whistle;
     ascolto_diarizer_init(&app->diarizer, app->config.diarizer_threshold);
@@ -212,6 +214,8 @@ int ascolto_live_app_init(ascolto_live_app_t* app, ascolto_whistle_t* whistle, c
         app->active_out_apps, sizeof(app->active_out_apps)
     );
 
+    /* Startup runs before the UI. Only archive paths are restored, never live counters. */
+    if (ascolto_storage_latest_transcript(app->config.config_path, app->files.md_path, sizeof(app->files.md_path), app->files.jsonl_path, sizeof(app->files.jsonl_path))) return -1;
     publish_snapshot_unlocked(app);
     return 0;
 }
@@ -220,7 +224,7 @@ static int start_session_unlocked(ascolto_live_app_t* app, bool is_manual) {
     if (app->state == ASCOLTO_STATE_RECORDING) return 0;
     if (app->state == ASCOLTO_STATE_STOPPING) return -2;
 
-    ascolto_transcript_open(app, is_manual);
+    if (ascolto_transcript_open(app, is_manual)) return -1;
 
     ascolto_diarizer_init(&app->diarizer, app->config.diarizer_threshold);
     ascolto_online_vad_reset(&app->vad_mic);
@@ -258,9 +262,7 @@ static int stop_session_unlocked(ascolto_live_app_t* app) {
     ascolto_online_vad_flush(&app->vad_sys, on_live_vad_turn, app);
     ascolto_online_vad_flush(&app->vad_mic, on_live_vad_turn, app);
 
-    double elapsed = now_monotonic_s() - app->session_start_epoch_s;
-    double stream_dur_s = (double)app->vad_mic.total_samples_processed / (double)ASCOLTO_SAMPLE_RATE;
-    if (stream_dur_s > elapsed) elapsed = stream_dur_s;
+    double elapsed = (double)(app->vad_mic.total_samples_processed > app->vad_sys.total_samples_processed ? app->vad_mic.total_samples_processed : app->vad_sys.total_samples_processed) / ASCOLTO_SAMPLE_RATE;
 
     ascolto_transcript_close(app, elapsed);
 
@@ -302,6 +304,7 @@ static int stop_session_locked(ascolto_live_app_t* app) {
     uint64_t generation = app->session_generation;
     ascolto_macos_capture_t* capture = app->capture;
     app->state = ASCOLTO_STATE_STOPPING;
+    ascolto_storage_state(app->config.config_path, app->files.database_session, "stopping", NULL);
     ascolto_diagnostic("Session stop committed generation=%llu", (unsigned long long)generation);
     publish_snapshot_unlocked(app);
     pthread_mutex_unlock(&app->lock);
@@ -346,15 +349,19 @@ void ascolto_live_app_on_mic_hardware_change(ascolto_live_app_t* app, bool mic_a
 }
 
 /* Called with app->lock held after a preference mutation. */
-static void save_preferences_unlocked(ascolto_live_app_t *app) {
-    ascolto_config_save(&app->config, NULL);
+static bool save_preferences_unlocked(ascolto_live_app_t *app, const ascolto_config_t *previous) {
+    app->settings_error = ascolto_config_save(&app->config, NULL);
+    if (app->settings_error) app->config = *previous;
     publish_snapshot_unlocked(app);
+    return !app->settings_error;
 }
 
 void ascolto_live_app_set_paused(ascolto_live_app_t* app, bool paused) {
     if (!app) return;
     pthread_mutex_lock(&app->lock);
+    ascolto_config_t previous = app->config;
     app->config.paused = paused;
+    if (!save_preferences_unlocked(app, &previous)) { pthread_mutex_unlock(&app->lock); return; }
     if (paused && app->state == ASCOLTO_STATE_RECORDING && !app->manual_override_active) {
         stop_session_locked(app);
     } else if (!paused && app->state == ASCOLTO_STATE_PAUSED) {
@@ -365,15 +372,16 @@ void ascolto_live_app_set_paused(ascolto_live_app_t* app, bool paused) {
     } else if (paused && app->state == ASCOLTO_STATE_IDLE) {
         app->state = ASCOLTO_STATE_PAUSED;
     }
-    save_preferences_unlocked(app);
+    publish_snapshot_unlocked(app);
     pthread_mutex_unlock(&app->lock);
 }
 
 void ascolto_live_app_set_auto_trigger(ascolto_live_app_t* app, bool enabled) {
     if (!app) return;
     pthread_mutex_lock(&app->lock);
+    ascolto_config_t previous = app->config;
     app->config.auto_trigger_mic = enabled;
-    ascolto_config_save(&app->config, NULL);
+    if (!save_preferences_unlocked(app, &previous)) { pthread_mutex_unlock(&app->lock); return; }
     if (enabled && !app->config.paused && app->mic_hardware_active && app->state == ASCOLTO_STATE_IDLE) {
         start_session_unlocked(app, false);
     }
@@ -384,50 +392,56 @@ void ascolto_live_app_set_auto_trigger(ascolto_live_app_t* app, bool enabled) {
 void ascolto_live_app_set_language(ascolto_live_app_t* app, const char* lang) {
     if (!app || !lang) return;
     pthread_mutex_lock(&app->lock);
+    ascolto_config_t previous = app->config;
     snprintf(app->config.language, sizeof(app->config.language), "%s", lang);
-    save_preferences_unlocked(app);
+    save_preferences_unlocked(app, &previous);
     pthread_mutex_unlock(&app->lock);
 }
 
 void ascolto_live_app_set_devices(ascolto_live_app_t* app, uint32_t mic_dev_id, uint32_t sys_dev_id) {
     if (!app) return;
     pthread_mutex_lock(&app->lock);
+    ascolto_config_t previous = app->config;
     app->config.mic_device_id = mic_dev_id;
     app->config.sys_device_id = sys_dev_id;
-    save_preferences_unlocked(app);
+    save_preferences_unlocked(app, &previous);
     pthread_mutex_unlock(&app->lock);
 }
 
 void ascolto_live_app_set_diarizer_threshold(ascolto_live_app_t* app, float threshold) {
     if (!app) return;
     pthread_mutex_lock(&app->lock);
+    ascolto_config_t previous = app->config;
     app->config.diarizer_threshold = threshold;
-    app->diarizer.similarity_threshold = threshold;
-    save_preferences_unlocked(app);
+    save_preferences_unlocked(app, &previous);
+    app->diarizer.similarity_threshold = app->config.diarizer_threshold;
     pthread_mutex_unlock(&app->lock);
 }
 
 void ascolto_live_app_set_save_audio(ascolto_live_app_t* app, bool enabled) {
     if (!app) return;
     pthread_mutex_lock(&app->lock);
+    ascolto_config_t previous = app->config;
     app->config.save_audio = enabled;
-    save_preferences_unlocked(app);
+    save_preferences_unlocked(app, &previous);
     pthread_mutex_unlock(&app->lock);
 }
 
 void ascolto_live_app_set_cloud_recap(ascolto_live_app_t* app, bool enabled) {
     if (!app) return;
     pthread_mutex_lock(&app->lock);
+    ascolto_config_t previous = app->config;
     app->config.cloud_recap = enabled;
-    save_preferences_unlocked(app);
+    save_preferences_unlocked(app, &previous);
     pthread_mutex_unlock(&app->lock);
 }
 
 void ascolto_live_app_set_recap_tts(ascolto_live_app_t* app, bool enabled) {
     if (!app) return;
     pthread_mutex_lock(&app->lock);
+    ascolto_config_t previous = app->config;
     app->config.recap_tts = enabled;
-    save_preferences_unlocked(app);
+    save_preferences_unlocked(app, &previous);
     pthread_mutex_unlock(&app->lock);
 }
 

@@ -5,9 +5,12 @@ GLIB_LIBS  := $(shell $(PKG_CFG) --libs json-glib-1.0 gio-2.0 gobject-2.0 glib-2
 AV_FLAGS   := $(shell $(PKG_CFG) --cflags libavformat libavcodec libavutil)
 AV_LIBS    := $(shell $(PKG_CFG) --libs libavformat libavcodec libavutil)
 CFLAGS   := -std=c11 -Wall -Wextra -O2 -g -MMD -MP -Iinclude -Ithird_party/whistle $(GLIB_FLAGS) $(AV_FLAGS)
-LDFLAGS  := third_party/whistle/libneedle.so -Wl,-rpath,'$$ORIGIN/../third_party/whistle' $(GLIB_LIBS) $(AV_LIBS) -ldl -lpthread -lm
+LDFLAGS  := third_party/whistle/libneedle.so -Wl,-rpath,'$$ORIGIN/../third_party/whistle' $(GLIB_LIBS) $(AV_LIBS) -ldl -lpthread -lm -lsqlite3
 
 CORE_SRCS := \
+	src/database.c \
+	src/storage.c \
+	src/ai_settings.c \
 	src/filesystem.c \
 	src/types_config.c \
 	src/observability.c \
@@ -82,3 +85,12 @@ install-autostart: all
 
 clean:
 	rm -rf build bin
+
+# Native GTK adapter verification; run with a session bus and an X11 test display.
+bin/tray_menu_test: $(filter-out build/tray_ui.o,$(CORE_OBJS)) tests/tray_menu.c src/tray_ui.c
+	@mkdir -p bin
+	$(CC) $(CFLAGS) $(filter-out build/tray_ui.o,$(CORE_OBJS)) tests/tray_menu.c -o $@ $(LDFLAGS)
+
+.PHONY: test-tray
+test-tray: all bin/tray_menu_test
+	dbus-run-session -- xvfb-run -a ./bin/tray_menu_test

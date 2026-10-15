@@ -19,6 +19,10 @@
 #define AQ_BUFFER_SAMPLES 3200 /* 200 ms @ 16 kHz */
 #define CAP_RING_CAPACITY (ASCOLTO_SAMPLE_RATE * 30) /* 30 seconds ring buffer per channel */
 
+/* Permission callbacks can outlive a capture controller. Keep their state at
+   process scope and never let a callback dereference a stopped controller. */
+static _Atomic bool mic_permission_pending;
+
 /* Record the exact HAL operation that stalls, without holding a log/file lock. */
 #define TRACE_HAL(status, operation) do { \
     CFAbsoluteTime hal_started = CFAbsoluteTimeGetCurrent(); \
@@ -71,8 +75,39 @@ struct ascolto_macos_capture_s {
     pthread_t monitor_thread;
     pthread_t worker_thread;
     _Atomic bool stop_requested;
-    bool mic_permission_requested;
+    CFAbsoluteTime permission_wait_started;
 };
+
+static bool capture_permissions_ready(ascolto_macos_capture_t* cap) {
+    /* Exercise stopping while a consent dialog is still outstanding without
+       resetting the user's macOS privacy settings. */
+    const char* delay_env = getenv("ASCOLTO_CAPTURE_TEST_PERMISSION_DELAY_MS");
+    int delay_ms = delay_env ? atoi(delay_env) : 0;
+    if (delay_ms > 0 && delay_ms <= 10000) {
+        if (cap->permission_wait_started == 0) {
+            cap->permission_wait_started = CFAbsoluteTimeGetCurrent();
+            ascolto_diagnostic("Capture waiting for permission test delay");
+        }
+        if ((CFAbsoluteTimeGetCurrent() - cap->permission_wait_started) * 1000.0 < delay_ms)
+            return false;
+    }
+
+    if (atomic_load(&mic_permission_pending)) return false;
+    AVAuthorizationStatus authorization = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    if (authorization != AVAuthorizationStatusNotDetermined) return true;
+
+    bool expected = false;
+    if (atomic_compare_exchange_strong(&mic_permission_pending, &expected, true)) {
+        ascolto_diagnostic("Capture waiting for microphone permission");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
+                ascolto_diagnostic("Microphone permission completed granted=%d", granted);
+                atomic_store(&mic_permission_pending, false);
+            }];
+        });
+    }
+    return false;
+}
 
 static int64_t timestamp_sample(ascolto_macos_capture_t* cap, const AudioTimeStamp* timestamp) {
     if (!timestamp || !(timestamp->mFlags & kAudioTimeStampHostTimeValid)) return -1;
@@ -511,20 +546,26 @@ static void* capture_monitor_thread_fn(void* arg) {
             uint64_t generation = app->session_generation;
             pthread_mutex_unlock(&app->lock);
 
+            /* Do not start either producer while consent is unresolved. Starting
+               the SYS tap during the MIC dialog can overlap HAL permission work
+               with AudioQueueStart. Stop must remain independent of that dialog. */
+            uint64_t observed_generation = generation;
+            bool permissions_ready = st == ASCOLTO_STATE_RECORDING && capture_permissions_ready(cap);
+            if (st == ASCOLTO_STATE_RECORDING && !permissions_ready) {
+                usleep(250000);
+                continue;
+            }
+
             pthread_mutex_lock(&cap->stream_lock);
-            if (st == ASCOLTO_STATE_RECORDING && generation != cap->suspended_generation && !cap->stop_requested) {
+            /* Stop may have committed while metadata or permission was queried. */
+            pthread_mutex_lock(&app->lock);
+            st = app->state;
+            generation = app->session_generation;
+            pthread_mutex_unlock(&app->lock);
+            if (st == ASCOLTO_STATE_RECORDING && permissions_ready && generation == observed_generation &&
+                generation != cap->suspended_generation && !cap->stop_requested) {
                 if (!cap->mic_stream.running && !cap->sys_tap.running && !cap->sys_aq_stream.running) ring_reset(cap);
-                /* Request microphone access before starting CoreAudio. An unresolved
-                   permission must not leave AudioQueueStart waiting for the UI thread. */
                 AVAuthorizationStatus authorization = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
-                if (authorization == AVAuthorizationStatusNotDetermined && !cap->mic_permission_requested) {
-                    cap->mic_permission_requested = true;
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
-                            fprintf(stderr, "[capture] Microphone permission: %s\n", granted ? "granted" : "denied");
-                        }];
-                    });
-                }
                 /* Both producers share host timestamps; MIC can start before the SYS tap. */
                 if (authorization == AVAuthorizationStatusAuthorized && !cap->mic_stream.running) {
                     fprintf(stderr, "[capture] Starting microphone\n");

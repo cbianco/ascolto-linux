@@ -100,6 +100,9 @@ int main(void) {
               "    json.dump(sys.argv, output)\n", file);
         fclose(file); chmod(config.recap_python, 0700);
         setenv("ASCOLTO_TEST_RECAP_ARGS", arguments_path, 1);
+        char jsonl_path[512];snprintf(jsonl_path,sizeof(jsonl_path),"%s/call 'quoted' $(unused).jsonl",directory);
+        ascolto_db_session_t stored={.started_at_ms=ascolto_db_now_ms(),.capture_backend="coreaudio"};int64_t stored_id=0;
+        if(ascolto_storage_session(config.config_path,&stored,md_path,jsonl_path,&stored_id))failures++;
         config.cloud_recap = true; config.recap_tts = true;
         if (ascolto_archive_finalize(&config, mic_path, sys_path, archive_path, md_path)) failures++;
         ascolto_archive_wait();

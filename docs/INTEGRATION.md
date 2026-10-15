@@ -115,7 +115,7 @@ linked into the same binary. The comparison builds one executable per algorithm.
 - The container has no live PipeWire server, GTK display, or installed ALSA speech
   fixtures. Upstream tests fall back to default device entries and headless UI;
   these results do not validate physical Linux capture or GNOME rendering.
-  Linux GTK actions retain their native upstream threading model.
+  Linux GTK menu mutations now use a serial background queue; see [native menu design](UI.md).
 - The raw `pw-record` pipe has no hardware timestamps. Linux estimates each
   stream's initial onset from its first delivered block and subsequently counts
   PCM samples on a common monotonic epoch. This preserves helper startup offsets
@@ -137,7 +137,7 @@ make test-recap
 make compare-diarizers
 ```
 
-`make recap-deps` creates the ignored `.venv` for NumPy/requests. Both launchers
+`make recap-deps` creates the ignored `.venv` for NumPy, requests and OAuth dependencies. Both launchers
 prefer it when available. `make compare-diarizers` needs the speech fixtures;
 macOS can generate them with `make fixtures`, while Linux can receive the same
 fixtures and override `FIXTURE_DIR` to their location. Recap setup and CLI details
@@ -225,3 +225,39 @@ regression was observed at this measurement precision. An unchanged native
 build/bundle takes about 0.036 s and runs no compiler or packaging commands.
 There are 183 fewer source/header/script/test lines overall, including the new
 regression; the main reduction is in duplicated state and mixed responsibilities.
+
+## Native settings, SQLite and AI workflow integration
+
+Both adapters now use the shared SQLite schema for native/AI settings, vocabulary,
+sessions, utterances, job history and artifact references. Native capture backends,
+Whistle defaults, acoustic gating and drain/overflow timeline rules are preserved.
+Session actions and consumers commit before derived transcript publication;
+background bootstrap adopts legacy data with immutable backups and recovers the
+export outbox. No captured PCM is stored in SQLite. Native writes cover recording,
+settings and exports; Python alone mutates AI connections, catalogs, preferences
+and jobs. See [DATABASE.md](DATABASE.md) for commit, queue, adoption and recovery
+contracts.
+
+The native Settings windows expose independent recap and optional post-call cloud
+transcription choices. Text recap works without audio saving; full-audio cloud
+transcription requires a separate model and explicit upload consent. Provisional
+and final notes use evidence-backed structured workflow outputs and independent
+job phases. Each attempt retains its own artifact directory. Secure-store names
+and OAuth host/account/workspace registrations survive metadata adoption.
+
+Verification includes the existing macOS harness/rooms/lifecycle/socket/menu tests,
+provider/workflow/legacy mocks, native and 24 Python DB checks, native storage
+fault/recovery checks (also passing ASan/UBSan) and eleven end-to-end wiring tests. AppKit light/dark previews
+cover all categories and provider profiles with a transcription fixture. GTK runs
+real settings/session callbacks under Xvfb, including a SQLite writer-busy
+responsiveness check. Linux builds run only in an isolated container. These tests
+do not establish physical Linux capture, full GNOME Shell behavior, live provider
+eligibility or real-call recognition accuracy. No real credentials, paid provider
+request, production installation or user-data migration is part of integration QA.
+
+Archive shortcuts are restored from ready SQLite artifact references before native
+UI startup, without presenting historical speech as an active recording. Dedicated
+AppKit and GTK regressions cover legacy import, restart and a changed future output
+directory. GTK preview verification requires a GdkPixbuf SVG loader; on
+Debian/Ubuntu install `librsvg2-common`. The fixture uses the built-in Adwaita theme
+with its dark preference, rather than depending on an external Adwaita-dark theme.

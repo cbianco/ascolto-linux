@@ -61,9 +61,11 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (!config_path && (getenv("ASCOLTO_MENUBAR_SMOKE_MS") || getenv("ASCOLTO_CAPTURE_SMOKE_TEST")))
+        config_path = "/tmp/ascolto-test/smoke-config/config.json";
     ascolto_config_t tmp_cfg;
     ascolto_config_init_defaults(&tmp_cfg);
-    ascolto_config_load(&tmp_cfg, config_path);
+    if (ascolto_config_load(&tmp_cfg, config_path) == -1) return 1;
 
     char resolved_model[1024];
     resolve_model_path(model_override ? model_override : tmp_cfg.model_path,
