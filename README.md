@@ -1,5 +1,12 @@
 # ascolto
 
+This personal fork tracks [Voloire/ascolto-linux](https://github.com/Voloire/ascolto-linux)
+and includes the existing native macOS application. `make` selects the host platform
+through `GNUmakefile`; the upstream Linux `Makefile` remains unchanged.
+See [macOS setup](README.macos.md) and the [feature comparison and integration plan](docs/INTEGRATION.md).
+The Linux instructions below describe the upstream implementation. Cloud recap and
+TTS are currently Linux features; the macOS app continues to transcribe locally.
+
 Applicativo desktop nativo in C per Linux (Ubuntu / GNOME) che rileva automaticamente le call e le trascrive in tempo reale in locale usando il motore Whistle di Cactus Compute, con separazione doppio canale e diarizzazione degli interlocutori.
 
 ## Caratteristiche principali

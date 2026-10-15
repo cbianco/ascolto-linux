@@ -22,3 +22,17 @@ third_party/whistle/*.cact
 *.pid
 /tmp/
 .DS_Store
+
+# macOS SDK artifacts, models, and generated verification output
+models/
+vendor/needle/needle
+*.dylib
+tests/fixtures/
+tests/room-results/
+tests/room-baseline/
+tests/legacy-results/
+tests/*.log
+tests/*.sample.txt
+tests/*-hang.txt
+tests/audio-feedback.json
+__pycache__/

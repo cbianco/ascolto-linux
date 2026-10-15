@@ -1,0 +1,107 @@
+CC       := clang
+CFLAGS   := -std=c11 -O2 -Wall -Wextra -Iinclude -Ivendor/needle
+OBJCFLAGS:= -O2 -Wall -Wextra -Iinclude -Ivendor/needle -fobjc-arc
+LDFLAGS  := vendor/needle/libneedle.a -lc++ \
+            -framework CoreAudio \
+            -framework AudioToolbox \
+            -framework AVFoundation \
+            -framework CoreFoundation \
+            -framework ApplicationServices \
+            -framework EventKit \
+            -framework Cocoa
+
+C_SRCS   := src/wav_audio.c \
+            src/diagnostics.c \
+            src/config.c \
+            src/mic_monitor.c \
+            src/vad.c \
+            src/macos/whistle_engine.c \
+            src/macos/diarizer.c \
+            src/session.c \
+            src/live_session.c \
+            src/capture_buffer.c \
+            src/room_bench.c
+
+OBJC_SRCS := src/capture_macos.c
+
+BIN_DIR  := bin
+HARNESS  := $(BIN_DIR)/ascolto-harness
+REGRESSION := $(BIN_DIR)/ascolto-regression
+APP_BIN  := $(BIN_DIR)/ascolto
+APP_BUNDLE := $(BIN_DIR)/Ascolto.app
+
+.PHONY: all deps fixtures build bundle test test-capture room-bench simulate probe run clean
+
+all: build bundle
+
+deps:
+	@mkdir -p vendor/needle models
+	@test -f vendor/needle/needle.h || curl -fL https://huggingface.co/Cactus-Compute/needle3/resolve/main/macos-arm64/needle.h -o vendor/needle/needle.h
+	@test -f vendor/needle/libneedle.a || curl -fL https://huggingface.co/Cactus-Compute/needle3/resolve/main/macos-arm64/libneedle.a -o vendor/needle/libneedle.a
+	@test -f models/whistle.cact || curl -fL https://huggingface.co/Cactus-Compute/whistle/resolve/main/whistle.cact -o models/whistle.cact
+
+fixtures:
+	@chmod +x scripts/gen_fixtures.sh
+	@./scripts/gen_fixtures.sh
+
+build: deps
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(OBJCFLAGS) -x objective-c $(C_SRCS) $(OBJC_SRCS) src/harness_main.c -x none $(LDFLAGS) -o $(HARNESS)
+	$(CC) $(OBJCFLAGS) -x objective-c $(C_SRCS) $(OBJC_SRCS) src/menubar_macos.m src/app_main.c -x none $(LDFLAGS) -o $(APP_BIN)
+	$(CC) $(OBJCFLAGS) -x objective-c $(C_SRCS) tests/regression_main.c -x none $(LDFLAGS) -o $(REGRESSION)
+
+bundle: build
+	@mkdir -p $(APP_BUNDLE)/Contents/MacOS $(APP_BUNDLE)/Contents/Resources
+	@cp $(APP_BIN) $(APP_BUNDLE)/Contents/MacOS/Ascolto
+	@cp models/whistle.cact $(APP_BUNDLE)/Contents/Resources/whistle.cact
+	@printf '%s\n' \
+		'<?xml version="1.0" encoding="UTF-8"?>' \
+		'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+		'<plist version="1.0">' \
+		'<dict>' \
+		'  <key>CFBundleExecutable</key><string>Ascolto</string>' \
+		'  <key>CFBundleIdentifier</key><string>com.cristianbianco.ascolto</string>' \
+		'  <key>CFBundleName</key><string>Ascolto</string>' \
+		'  <key>CFBundleDisplayName</key><string>Ascolto</string>' \
+		'  <key>CFBundlePackageType</key><string>APPL</string>' \
+		'  <key>CFBundleShortVersionString</key><string>1.0</string>' \
+		'  <key>LSUIElement</key><true/>' \
+		'  <key>NSMicrophoneUsageDescription</key><string>Ascolto usa il microfono per trascrivere la tua voce durante le call.</string>' \
+		'  <key>NSAudioCaptureUsageDescription</key><string>Ascolto cattura l audio di sistema della call per distinguere e trascrivere gli altri partecipanti.</string>' \
+		'  <key>NSCalendarsFullAccessUsageDescription</key><string>Ascolto legge il titolo e i partecipanti della call in corso dal Calendario per arricchire la trascrizione.</string>' \
+		'  <key>NSCalendarsUsageDescription</key><string>Ascolto legge il titolo e i partecipanti della call in corso dal Calendario per arricchire la trascrizione.</string>' \
+		'</dict>' \
+		'</plist>' > $(APP_BUNDLE)/Contents/Info.plist
+	@codesign --force --deep --sign - $(APP_BUNDLE)
+
+test: build bundle
+	@test -f tests/fixtures/spk3_turn1.wav || $(MAKE) fixtures
+	./$(HARNESS) test
+	./$(REGRESSION)
+	./$(APP_BIN) --config /tmp/ascolto-test/smoke_config.json --smoke-test
+
+room-bench: build
+	@test -f tests/fixtures/spk3_turn1.wav || $(MAKE) fixtures
+	./$(HARNESS) room-bench --output tests/room-results
+
+test-capture: bundle
+	python3 scripts/test_capture.py
+
+simulate: build
+	@test -f tests/fixtures/call_mic.wav || $(MAKE) fixtures
+	./$(HARNESS) simulate \
+		--mic tests/fixtures/call_mic.wav \
+		--sys tests/fixtures/call_sys.wav \
+		--lang it \
+		--keywords $$'Cristian\nprogetto\ndesign\nserver\nsviluppo\ndocumento' \
+		--trace /tmp/ascolto-test/call_trace.jsonl
+
+probe: build
+	./$(HARNESS) probe-macos
+	./$(HARNESS) probe-engine
+
+run: bundle
+	open $(APP_BUNDLE)
+
+clean:
+	rm -rf $(BIN_DIR)
