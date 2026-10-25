@@ -38,6 +38,9 @@ tests/audio-feedback.json
 __pycache__/
 *.py[cod]
 
+# Private local STT reports contain call excerpts and derived transcripts.
+reports/local-stt-*/
+
 # Local credentials and runtime databases
 .env
 .env.*

@@ -10,6 +10,7 @@ import sys
 
 from ascolto_database import Database, DatabaseError, now_ms
 from ascolto_files import atomic_text
+from ascolto_job_diagnostics import JobDiagnostics, DiagnosticStorageError
 
 
 def session_directory(db, session):
@@ -25,10 +26,11 @@ def archive_status(db):
     row = db.connection.execute("SELECT session_id,path FROM artifacts WHERE kind='transcript_md' AND state='ready' ORDER BY (SELECT started_at_ms FROM sessions WHERE id=session_id) DESC,session_id DESC LIMIT 1").fetchone()
     if row:
         result.update(transcript=row['path'], call_directory=str(session_directory(db, row['session_id'])))
-        recap = db.connection.execute("SELECT a.path FROM artifacts a JOIN recap_jobs j ON a.recap_job_id=j.id WHERE a.session_id=? AND a.kind='recap_md' AND a.state='ready' AND j.status='completed' ORDER BY (j.phase='final') DESC,j.id DESC,a.id DESC LIMIT 1", (row['session_id'],)).fetchone()
-        if recap:
-            alias = session_directory(db, row['session_id'])/'recap.md'
-            result['recap'] = str(alias) if alias.is_file() else recap[0]
+    # A newer empty call must not hide the most recent readable final recap.
+    for recap in db.connection.execute("SELECT a.path FROM artifacts a JOIN recap_jobs j ON a.recap_job_id=j.id JOIN sessions s ON s.id=a.session_id WHERE a.kind='recap_md' AND a.state='ready' AND j.status='completed' AND j.phase='final' ORDER BY s.started_at_ms DESC,j.id DESC,a.id DESC"):
+        if Path(recap[0]).is_file():
+            result['recap'] = recap[0]
+            break
     return result
 
 
@@ -76,7 +78,10 @@ def reconcile_jobs(db, config):
                 continue
             current = db.connection.execute('SELECT status FROM recap_jobs WHERE id=?', (job['id'],)).fetchone()
             if current and current[0] in ('queued','validating','running'):
-                db.update_job(job['id'], 'failed', error_code='interrupted')
+                from ascolto_diagnostics import cancellation_requested, clear_cancellation
+                cancelled = cancellation_requested(config, job['id'])
+                db.update_job(job['id'], 'cancelled' if cancelled else 'failed', error_code='cancelled' if cancelled else 'interrupted')
+                clear_cancellation(config, job['id'])
 
 
 def recover_exports(db):
@@ -86,8 +91,12 @@ def recover_exports(db):
             db.publish_exports(row['session_id'], row['md'], row['jsonl'])
 
 
-def _session(db, transcript=None):
-    if transcript:
+def _session(db, transcript=None, session_id=None):
+    if session_id is not None:
+        if type(session_id) is not int or session_id <= 0:
+            raise DatabaseError('Choose a valid persisted session')
+        row = db.connection.execute('SELECT id FROM sessions WHERE id=?', (session_id,)).fetchone()
+    elif transcript:
         row = db.connection.execute('SELECT session_id FROM artifacts WHERE path=?', (str(Path(transcript).resolve()),)).fetchone()
     else:
         row = db.connection.execute("SELECT id FROM sessions WHERE state IN ('recording','paused','completed') ORDER BY started_at_ms DESC,id DESC LIMIT 1").fetchone()
@@ -97,12 +106,23 @@ def _session(db, transcript=None):
 
 
 def handle_request(manager, request):
-    from ai_workflows import refresh_transcription_models, TaskSelection, WorkflowRunner, load_turns, decoded_channels, channel_durations, WorkflowError
+    from ai_workflows import refresh_transcription_models, TaskSelection, WorkflowRunner, load_turns, decoded_channels, channel_durations, WorkflowError, MAX_SOURCE_BYTES
     operation = request['action']
     if operation == 'refresh_transcription_models':
         models = refresh_transcription_models(manager)
         return {'message': f'Loaded {len(models)} dedicated OpenRouter transcription models.'}
     with manager.database() as db:
+        if operation == 'diagnostics':
+            from ascolto_diagnostics import snapshot
+            reconcile_jobs(db, manager.path)
+            db.connection.execute('BEGIN')
+            try:
+                return snapshot(db, manager.path)
+            finally:
+                db.connection.rollback()
+        if operation == 'cancel_job':
+            from ascolto_diagnostics import cancel_job
+            return cancel_job(db, manager.path, request.get('job_id'))
         if operation == 'archive_path':
             kind = request.get('kind')
             if kind not in ('call_directory', 'transcript', 'recap'):
@@ -135,13 +155,16 @@ def handle_request(manager, request):
             language = request.get('language', 'auto')
             with db.transaction():
                 db.connection.execute('UPDATE transcription_preferences SET connection_id=?,model_id=?,language=?,enabled=?,cloud_audio_opt_in=? WHERE id=1', (identifier, model, language, int(enabled), int(consent)))
-            return {'message': 'Post-call transcription preferences saved. Live transcription continues with Whistle.'}
-        session = _session(db, request.get('transcript'))
+            return {'message': 'Post-call transcription preferences saved. The on-device model selection is unchanged.'}
+        session = _session(db, request.get('transcript'), request.get('session_id'))
         source = db.connection.execute("SELECT path FROM artifacts WHERE session_id=? AND kind='transcript_jsonl' AND state='ready'", (session,)).fetchone()
         if not source:
             raise WorkflowError('invalid_source', 'The committed local transcript has not been exported. Retry after saving finishes.')
         transcription = operation in ('transcription', 'plan_transcription')
         task = 'transcription' if transcription else 'recap'
+        input_budget = request.get('input_budget', 12000)
+        if type(input_budget) is not int or not 4096 <= input_budget <= MAX_SOURCE_BYTES:
+            raise WorkflowError('invalid_request', 'Choose a bounded recap input budget between 4096 and 16777216 bytes.')
         state = db.connection.execute('SELECT state FROM sessions WHERE id=?', (session,)).fetchone()[0]
         if request.get('automatic') and state != 'completed':
             raise WorkflowError('invalid_source', 'Automatic AI tasks require a successfully saved session.')
@@ -151,6 +174,9 @@ def handle_request(manager, request):
         if request.get('automatic') and not preference['enabled' if transcription else 'auto_generate']:
             return {'message': 'Automatic task is disabled.'}
         selection = db.task_selection(task)
+        for field in ('provider', 'model'):
+            if 'expected_' + field in request and request['expected_' + field] != selection[field]:
+                raise WorkflowError('selection_changed', 'The selected provider or model changed. Refresh activity before requesting a new attempt.')
         chosen = TaskSelection(selection['provider'], selection['model'])
         turns = load_turns(source[0], allow_empty=transcription)
         archive = None
@@ -176,7 +202,10 @@ def handle_request(manager, request):
         lock_path = manager.path.with_name(f'.session-{session}-{task}.lock')
         with open(lock_path, 'a') as lock:
             os.chmod(lock_path, 0o600)
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise WorkflowError('task_busy', 'This session already has an active request for this task.') from None
             if request.get('automatic') and db.connection.execute("SELECT 1 FROM recap_jobs WHERE session_id=? AND task=? AND phase='final'", (session, task)).fetchone():
                 return {'message': 'The automatic task is already queued or completed.'}
             from dataclasses import asdict
@@ -187,20 +216,34 @@ def handle_request(manager, request):
                         for block in iter(lambda: audio_input.read(1024*1024), b''):
                             source_digest.update(block)
             digest = source_digest.hexdigest()
+            previous_job = db.connection.execute("SELECT status FROM recap_jobs WHERE session_id=? AND task=? AND phase=? ORDER BY id DESC LIMIT 1",
+                                                (session, task, 'provisional' if operation == 'provisional_recap' else 'final')).fetchone()
+            resume = bool(previous_job and previous_job['status'] in ('failed', 'cancelled'))
             job = db.enqueue_job(task, session, preference['connection_id'], chosen.model, selection['language'], digest)
+            from ascolto_diagnostics import CancellableManager, clear_cancellation
+            cancellable = CancellableManager(manager, manager.path, job)
             if operation == 'provisional_recap':
                 db.connection.execute("UPDATE recap_jobs SET phase='provisional' WHERE id=?", (job,))
             call_directory = session_directory(db, session)
             output_root = call_directory / ('Data/Transcription-history' if transcription else 'Recap-history')
             output = output_root / f'job-{job}'
-            for directory in (output_root, output):
-                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-                os.chmod(directory, 0o700)
+            diagnostics = JobDiagnostics(manager.path, job)
             def event_sink(event):
+                cancellable.check()
+                diagnostics.record({**event, 'stage': 'registering_artifacts', 'status': 'running'}
+                                   if event['status'] == 'completed' else event)
                 if event['status'] not in ('completed', 'failed'):
-                    db.update_job(job, event['status'])
-            runner = WorkflowRunner(manager, event_sink=event_sink, max_requests=max(64, plan['requests']) if plan else 4096, session_id=str(session))
+                    current = db.connection.execute('SELECT status FROM recap_jobs WHERE id=?', (job,)).fetchone()
+                    # Repeated chunk-level running events must not reset the
+                    # initial request timestamp used by activity elapsed time.
+                    if current[0] != event['status']:
+                        db.update_job(job, event['status'])
+            runner = WorkflowRunner(cancellable, event_sink=event_sink, max_requests=max(64, plan['requests']) if plan else 4096, session_id=str(session), input_budget=input_budget,
+                                    checkpoint_dir=None if transcription else output_root / '.validated-chunks', reuse_checkpoints=resume)
             try:
+                for directory in (output_root, output):
+                    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    os.chmod(directory, 0o700)
                 if transcription:
                     runner.transcribe(chosen, archive, turns, output, cloud_audio_opt_in=True, scope='full', language=None if selection['language'] == 'auto' else selection['language'])
                     artifacts = [('transcript.cloud.ai.jsonl', 'cloud_jsonl'), ('transcript.cloud.ai.md', 'cloud_md')]
@@ -212,6 +255,7 @@ def handle_request(manager, request):
                     prefix = 'recap.provisional.ai' if mode == 'provisional' else 'recap.ai'
                     artifacts = [(prefix+'.json', 'recap_json'), (prefix+'.md', 'recap_md')]
                 with db.transaction():
+                    cancellable.check()
                     for filename, kind in artifacts:
                         target = output / filename
                         db.register_artifact(session, kind, target, job_id=job, sha256=hashlib.sha256(target.read_bytes()).hexdigest())
@@ -219,11 +263,30 @@ def handle_request(manager, request):
                         for filename, target in ((prefix+'.json', call_directory/'Data'/'recap.json'), (prefix+'.md', call_directory/'recap.md')):
                             atomic_text(target, (output/filename).read_text(encoding='utf-8'))
                     db.update_job(job, 'completed')
+                previous = diagnostics.records[-1] if diagnostics.records else {}
+                try:
+                    diagnostics.record({**previous, 'stage': 'completed', 'status': 'completed'})
+                except DiagnosticStorageError:
+                    pass  # Completed artifacts and database state are already durable.
+                for checkpoint in runner.checkpoint_paths:
+                    try:
+                        checkpoint.unlink(missing_ok=True)
+                    except OSError:
+                        pass  # Cache cleanup cannot turn a durable recap into a failure.
                 return {'job_id': job, 'output_dir': str(output), 'session_dir': str(call_directory), 'message': f'{task.capitalize()} completed. Artifacts: {call_directory}', 'plan': plan}
             except BaseException as error:
-                code = getattr(error, 'code', 'workflow_error')
-                db.update_job(job, 'failed', error_code=code if isinstance(code, str) and code.replace('_', '').isalnum() and len(code) <= 64 else 'workflow_error')
+                code = getattr(error, 'code', 'storage_error' if isinstance(error, OSError) else 'workflow_error')
+                error.details = {**getattr(error, 'details', {}), 'job_id': job}
+                db.update_job(job, 'cancelled' if code == 'cancelled' else 'failed', error_code=code if isinstance(code, str) and code.replace('_', '').isalnum() and len(code) <= 64 else 'workflow_error')
+                try:
+                    previous = diagnostics.records[-1] if diagnostics.records else {}
+                    diagnostics.record({**previous, **getattr(error, 'details', {}),
+                                        'status': 'cancelled' if code == 'cancelled' else 'failed'})
+                except DiagnosticStorageError:
+                    pass  # Keep the original failure and its durable database state.
                 raise
+            finally:
+                clear_cancellation(manager.path, job)
 
 
 def main(argv=None):
@@ -231,6 +294,7 @@ def main(argv=None):
     parser.add_argument('--config', required=True)
     parser.add_argument('--platform', choices=['macos', 'linux'])
     parser.add_argument('--transcript')
+    parser.add_argument('--input-budget', type=int, default=12000, help='Per-attempt recap source byte budget, also bounded by the model context')
     parser.add_argument('action', choices=['bootstrap', 'automatic', 'automatic_audio', 'recap', 'transcription', 'plan_transcription'])
     args = parser.parse_args(argv)
     try:
@@ -241,11 +305,14 @@ def main(argv=None):
             from ai_providers import ProviderManager
             manager = ProviderManager(args.config)
             action = 'transcription' if args.action == 'automatic_audio' else 'recap' if args.action == 'automatic' else args.action
-            result = handle_request(manager, {'action': action, 'transcript': args.transcript, 'automatic': args.action.startswith('automatic')})
+            result = handle_request(manager, {'action': action, 'transcript': args.transcript, 'automatic': args.action.startswith('automatic'), 'input_budget': args.input_budget})
         print(json.dumps({'ok': True, 'result': result}))
         return 0
     except Exception as error:
-        print(json.dumps({'ok': False, 'error_code': getattr(error, 'code', 'storage_error'), 'message': str(error) if isinstance(error, DatabaseError) or hasattr(error, 'code') else 'Storage or workflow failed. Existing local artifacts have been retained.'}))
+        from ascolto_job_diagnostics import safe_details
+        print(json.dumps({'ok': False, 'error_code': getattr(error, 'code', 'storage_error'),
+                          'details': safe_details(getattr(error, 'details', {})),
+                          'message': str(error) if isinstance(error, DatabaseError) or hasattr(error, 'code') else 'Storage or workflow failed. Existing local artifacts have been retained.'}))
         if args.action == 'bootstrap':
             print('Storage bootstrap failed: ' + str(error), file=sys.stderr)
         return 1

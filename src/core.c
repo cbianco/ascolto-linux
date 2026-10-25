@@ -67,7 +67,7 @@ static void process_and_commit_utterance_unlocked(
     double end_sec,
     const char *hint_text
 ) {
-    if (!core || !pcm || num_samples < (ASCOLTO_SAMPLE_RATE / 4)) return;
+    if (!core || !pcm || num_samples < (ASCOLTO_SAMPLE_RATE / 4) || core->transcription_error) return;
 
     char lang[16];
     char keywords[1024];
@@ -77,15 +77,16 @@ static void process_and_commit_utterance_unlocked(
     pthread_mutex_unlock(&core->mutex);
 
     ascolto_whistle_result_t wres;
-    ascolto_whistle_process_segment(
-        &core->whistle,
-        pcm,
-        num_samples,
-        lang,
-        keywords,
-        hint_text,
-        &wres
-    );
+    if (core->local_stt.context) {
+        ascolto_stt_text_t text;
+        if (ascolto_local_stt_transcribe(core->local_models, &core->local_stt, pcm,
+            (int)num_samples, lang, keywords, &text)) { core->transcription_error = true; return; }
+        ascolto_whistle_embed_segment(&core->whistle, pcm, num_samples, &wres);
+        snprintf(wres.text, sizeof(wres.text), "%s", text.text);
+        snprintf(wres.language, sizeof(wres.language), "%s", text.language);
+    } else {
+        ascolto_whistle_process_segment(&core->whistle, pcm, num_samples, lang, keywords, hint_text, &wres);
+    }
 
     /* Mock IPC speech is a formant fixture, not a recording of spoken words.
        Its explicit hint supplies text while the real encoder still supplies embeddings. */
@@ -147,7 +148,7 @@ static void process_and_commit_utterance_unlocked(
     seg.speaker_id = spk_id;
     seg.speaker_similarity = sim;
     snprintf(seg.text, sizeof(seg.text), "%s", wres.text);
-    snprintf(seg.language, sizeof(seg.language), "%s", wres.language[0] ? wres.language : core->config.language);
+    snprintf(seg.language, sizeof(seg.language), "%s", wres.language[0] ? wres.language : core->local_stt.context ? "" : core->config.language);
     seg.ttft_ms = wres.ttft_ms;
     seg.decode_tps = wres.decode_tps;
     seg.rms_db = rms_db;
@@ -161,7 +162,8 @@ static void process_and_commit_utterance_unlocked(
     }
 
     ascolto_db_utterance_t turn={.session_id=core->database_session,.start_ms=(int64_t)(seg.start_sec*1000+0.5),.end_ms=(int64_t)(seg.end_sec*1000+0.5),.channel=ascolto_channel_to_string(seg.channel),.speaker_label=seg.speaker_label,.text=seg.text,.language=seg.language,.source_app=core->active_mic_app};
-    char diagnostics[512];snprintf(diagnostics,sizeof(diagnostics),"{\"seq_id\":%llu,\"speaker_id\":%d,\"similarity\":%.3f,\"pitch_hz\":%.1f,\"rms_db\":%.1f,\"ttft_ms\":%.1f}",(unsigned long long)seg.seq_id,seg.speaker_id,seg.speaker_similarity,seg.pitch_hz,seg.rms_db,seg.ttft_ms);
+    char timing[32];if(core->local_stt.context)snprintf(timing,sizeof(timing),"null");else snprintf(timing,sizeof(timing),"%.1f",seg.ttft_ms);
+    char diagnostics[512];snprintf(diagnostics,sizeof(diagnostics),"{\"seq_id\":%llu,\"speaker_id\":%d,\"similarity\":%.3f,\"pitch_hz\":%.1f,\"rms_db\":%.1f,\"ttft_ms\":%s,\"local_model\":\"%s\"}",(unsigned long long)seg.seq_id,seg.speaker_id,seg.speaker_similarity,seg.pitch_hz,seg.rms_db,timing,core->local_stt.id);
     turn.metadata_json=diagnostics;
     int storage_result=ascolto_storage_write(core->config.config_path,&core->storage_writer,&turn);
     core->storage_error=storage_result;
@@ -207,16 +209,23 @@ static int start_session_unlocked(ascolto_core_t *core, ascolto_state_t target_s
     char mic_dev[128], sys_dev[128];
 
     pthread_mutex_lock(&core->mutex);
-    if (core->state != ASCOLTO_STATE_IDLE) {
-        int result = core->state == ASCOLTO_STATE_STOPPING ? -2 : 0;
+    if (core->state != ASCOLTO_STATE_IDLE || core->session_starting) {
+        int result = core->state == ASCOLTO_STATE_STOPPING || core->session_starting ? -2 : 0;
         pthread_mutex_unlock(&core->mutex);
         return result;
     }
 
-    if(core->storage_writer.head && ascolto_storage_flush(core->config.config_path,&core->storage_writer)){pthread_mutex_unlock(&core->mutex);return -1;}
+    core->session_starting = true;
+    pthread_mutex_unlock(&core->mutex);
+    int local_result = ascolto_local_stt_begin(core->local_models, &core->local_stt);
+    pthread_mutex_lock(&core->mutex);
+    if (local_result) goto start_failed;
+    core->transcription_error = false;
+
+    if(core->storage_writer.head && ascolto_storage_flush(core->config.config_path,&core->storage_writer)){goto start_failed;}
     memset(&core->storage_writer,0,sizeof(core->storage_writer));
     core->session_id++;
-    if(ascolto_storage_call_directory(core->config.output_dir,core->active_mic_app,core->current_session_dir,sizeof(core->current_session_dir)-64)){pthread_mutex_unlock(&core->mutex);return -1;}
+    if(ascolto_storage_call_directory(core->config.output_dir,core->active_mic_app,core->current_session_dir,sizeof(core->current_session_dir)-64)){goto start_failed;}
     snprintf(core->current_md_path, sizeof(core->current_md_path), "%.447s/transcript.md", core->current_session_dir);
     snprintf(core->current_jsonl_path, sizeof(core->current_jsonl_path), "%.447s/Data/transcript.jsonl", core->current_session_dir);
 
@@ -231,11 +240,12 @@ static int start_session_unlocked(ascolto_core_t *core, ascolto_state_t target_s
     }
 
     char *vocabulary=ascolto_storage_vocabulary(core->config.keywords);
-    if(!vocabulary){pthread_mutex_unlock(&core->mutex);return -1;}
-    ascolto_db_session_t stored={.started_at_ms=ascolto_db_now_ms(),.capture_backend="pipewire",.source_app=core->active_mic_app,.vocabulary_snapshot_json=vocabulary};
+    if(!vocabulary){goto start_failed;}
+    char initial_metadata[128];snprintf(initial_metadata,sizeof(initial_metadata),"{\"local_model\":\"%s\"}",core->local_stt.id);
+    ascolto_db_session_t stored={.metadata_json=initial_metadata,.started_at_ms=ascolto_db_now_ms(),.capture_backend="pipewire",.source_app=core->active_mic_app,.vocabulary_snapshot_json=vocabulary};
     core->storage_error=ascolto_storage_session(core->config.config_path,&stored,core->current_md_path,core->current_jsonl_path,&core->database_session);
     free(vocabulary);
-    if(core->storage_error){for(int ch=0;ch<2;ch++){ascolto_audio_recorder_close(core->recorder[ch]);core->recorder[ch]=NULL;}pthread_mutex_unlock(&core->mutex);return -1;}
+    if(core->storage_error){for(int ch=0;ch<2;ch++){ascolto_audio_recorder_close(core->recorder[ch]);core->recorder[ch]=NULL;}goto start_failed;}
     for(int ch=0;ch<2;ch++)if(core->current_audio_path[ch][0])ascolto_storage_artifact(core->config.config_path,core->database_session,ch?"audio_sys_flac":"audio_mic_flac",core->current_audio_path[ch],"pending");
 
     add_recent_file(core, core->current_md_path);
@@ -282,6 +292,13 @@ static int start_session_unlocked(ascolto_core_t *core, ascolto_state_t target_s
              reason ? reason : "manual");
     ascolto_obs_emit(&core->obs, "session_started", ev);
     return 0;
+start_failed:
+    for (int ch = 0; ch < 2; ++ch) { ascolto_audio_recorder_close(core->recorder[ch]); core->recorder[ch] = NULL; }
+    core->session_starting = false;
+    pthread_cond_broadcast(&core->session_condition);
+    pthread_mutex_unlock(&core->mutex);
+    ascolto_local_stt_end(core->local_models, &core->local_stt);
+    return -1;
 }
 
 static int stop_session_unlocked(ascolto_core_t *core, const char *reason) {
@@ -308,8 +325,8 @@ static int stop_session_unlocked(ascolto_core_t *core, const char *reason) {
     core->audio.stop_capture(&core->audio);
 
     /* Flush any remaining voiced utterances (>= 0.25s) */
-    ascolto_core_flush_channel(core, ASCOLTO_CHANNEL_MIC);
     ascolto_core_flush_channel(core, ASCOLTO_CHANNEL_SYS);
+    ascolto_core_flush_channel(core, ASCOLTO_CHANNEL_MIC);
 
     ascolto_audio_recorder_t *recorders[2];
     pthread_mutex_lock(&core->mutex);
@@ -323,20 +340,21 @@ static int stop_session_unlocked(ascolto_core_t *core, const char *reason) {
 
     pthread_mutex_lock(&core->mutex);
     core->storage_error=ascolto_storage_flush(core->config.config_path,&core->storage_writer);
-    char stored_metadata[256];snprintf(stored_metadata,sizeof(stored_metadata),"{\"duration_s\":%.3f,\"remote_speakers\":%d}",fmax(core->session_audio_sec[0],core->session_audio_sec[1]),core->diarizer.speaker_count);
-    if(ascolto_storage_state(core->config.config_path,core->database_session,core->storage_error?"failed":"completed",stored_metadata))core->storage_error=1;
+    char stored_metadata[256];snprintf(stored_metadata,sizeof(stored_metadata),"{\"duration_s\":%.3f,\"remote_speakers\":%d,\"local_model\":\"%s\",\"transcription_failed\":%s}",fmax(core->session_audio_sec[0],core->session_audio_sec[1]),core->diarizer.speaker_count,core->local_stt.id,core->transcription_error?"true":"false");
+    if(ascolto_storage_state(core->config.config_path,core->database_session,core->storage_error||core->transcription_error?"failed":"completed",stored_metadata))core->storage_error=1;
     for(int ch=0;ch<2;ch++)if(core->current_audio_path[ch][0])ascolto_storage_artifact(core->config.config_path,core->database_session,ch?"audio_sys_flac":"audio_mic_flac",core->current_audio_path[ch],"ready");
     uint64_t sid = core->session_id;
     int spk_cnt = core->diarizer.speaker_count;
     uint64_t tot_seg = core->total_segments;
     bool use_ai = ascolto_ai_automatic_enabled(core->config.config_path);
-    bool run_recap = core->config.cloud_recap && had_audio && !use_ai;
+    bool run_recap = core->config.cloud_recap && had_audio && !use_ai && !core->transcription_error;
     char recap_md[512];
     snprintf(recap_md, sizeof(recap_md), "%s", core->current_md_path);
     pthread_mutex_unlock(&core->mutex);
-    if (!core->storage_error && tot_seg > 0) ascolto_ai_recap_start(core->config.config_path, recap_md, true);
-    if (!core->storage_error && had_audio) ascolto_ai_task_start(core->config.config_path, recap_md, "automatic_audio");
+    if (!core->storage_error && !core->transcription_error && tot_seg > 0) ascolto_ai_recap_start(core->config.config_path, recap_md, true);
+    if (!core->storage_error && !core->transcription_error && had_audio) ascolto_ai_task_start(core->config.config_path, recap_md, "automatic_audio");
     if (run_recap) ascolto_core_run_recap(core, recap_md);
+    ascolto_local_stt_end(core->local_models, &core->local_stt);
     pthread_mutex_lock(&core->mutex);
     core->state = ASCOLTO_STATE_IDLE;
     core->drain_recording = false;
@@ -410,6 +428,8 @@ int ascolto_core_init(ascolto_core_t *core, const ascolto_config_t *cfg, bool us
     ascolto_diarizer_init(&core->diarizer, core->config.diarization_sensitivity);
     core->diarizer.custom_threshold = core->config.custom_threshold;
 
+    core->local_models = ascolto_local_models_create(core->config.config_path);
+    if (!core->local_models) return -1;
     ascolto_whistle_init(&core->whistle, core->config.weights_path);
     ascolto_audio_backend_create(&core->audio, use_mock_audio, on_audio_chunk_cb, on_mic_trigger_cb, core);
     ascolto_tray_init(&core->tray, core, core->config.headless);
@@ -434,6 +454,7 @@ void ascolto_core_destroy(ascolto_core_t *core) {
     ascolto_obs_destroy(&core->obs);
     core->audio.destroy(&core->audio);
     ascolto_whistle_destroy(&core->whistle);
+    ascolto_local_models_destroy(core->local_models);
 
     for (int ch = 0; ch < 2; ch++) {
         ascolto_online_vad_free(&core->vad[ch]);

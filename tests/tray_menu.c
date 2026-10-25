@@ -81,9 +81,53 @@ static void preview_settings(ascolto_core_t *core) {
     }
     /* All native settings must remain usable alongside the serial menu queue. */
     p->settings_category = 2; settings_build(&core->tray);
-    assert(p->settings_keywords);
+    assert(p->settings_keywords && p->local_models_box);
+    /* The cloud tab keeps a distinct model and consent surface. */
+    p->settings_cloud_tab=true;settings_build(&core->tray);assert(p->stt_model&&p->stt_consent&&!p->local_models_box);
+    p->settings_cloud_tab=false;settings_build(&core->tray);assert(p->settings_keywords&&p->local_models_box);
     s_gtk_entry_set_text(p->settings_keywords, "Fixture, glossary"); settings_keywords(NULL, &core->tray); settle(core);
     assert(!strcmp(core->config.keywords, "Fixture, glossary"));
+    /* Diagnostics use fixture metadata only; no keyring or provider request. */
+    on_menu_diagnostics(NULL, &core->tray);
+    assert(p->diagnostics_window == p->settings_window && p->diagnostics_timer);
+    if (p->diagnostics_worker) {
+        g_object_set_data(G_OBJECT(p->diagnostics_worker), "diagnostics-ui", NULL);
+        g_subprocess_force_exit(p->diagnostics_worker); g_clear_object(&p->diagnostics_worker);
+    }
+    g_source_remove(p->diagnostics_timer); p->diagnostics_timer = 0;
+    parser = json_parser_new();
+    const char *diagnostic_fixture = "{\"summary\":{\"total_calls\":2,\"needs_attention\":1,\"running\":0},\"calls\":[{\"id\":45,\"label\":\"Call 12:21\",\"status\":\"Needs attention\",\"outcome\":\"Recap publication blocked\",\"reason\":\"A citation did not match the transcript. Local artifacts are retained.\",\"needs_attention\":true,\"operations\":[{\"name\":\"Local transcript\",\"status\":\"Ready\"}],\"artifacts\":[],\"attempts\":[{\"id\":6,\"attempt\":1,\"task\":\"recap\",\"phase\":\"final\",\"status\":\"failed\",\"provider\":\"openrouter\",\"model\":\"fixture-model\",\"error_code\":\"invalid_evidence\",\"elapsed_ms\":33000,\"events\":[{\"status\":\"failed\",\"at_ms\":1792146442002}]}],\"safe_report\":\"Session: 45\\nError: invalid_evidence\"},{\"id\":46,\"label\":\"Call 13:05\",\"status\":\"Ready\",\"outcome\":\"Recap ready\",\"needs_attention\":false,\"attempts\":[],\"safe_report\":\"Session: 46\"}]}";
+    assert(json_parser_load_from_data(parser, diagnostic_fixture, -1, NULL));
+    if (p->diagnostics_state) json_object_unref(p->diagnostics_state);
+    p->diagnostics_state = json_object_ref(json_node_get_object(json_parser_get_root(parser))); g_object_unref(parser);
+    p->diagnostics_selected = 45; p->diagnostics_expanded = true; diagnostics_build(&core->tray);
+    assert(diagnostics_number(diagnostics_selected(&core->tray), "id") == 45);
+    GList *diagnostic_children = s_gtk_container_get_children(p->diagnostics_list);
+    assert(g_list_length(diagnostic_children) == 3); g_list_free(diagnostic_children);
+    p->diagnostics_attention = true; diagnostics_build(&core->tray);
+    diagnostic_children = s_gtk_container_get_children(p->diagnostics_list);
+    assert(g_list_length(diagnostic_children) == 2); g_list_free(diagnostic_children);
+    diagnostics_preview(NULL, &core->tray); assert(p->diagnostics_preview);
+    assert(p->diagnostics_window == p->settings_window);
+    diagnostics_preview_close(NULL, &core->tray); assert(!p->diagnostics_preview);
+    for (int theme = 0; theme < 2; theme++) {
+        g_object_set(gtk_settings_get_default(), "gtk-theme-name", "Adwaita", "gtk-application-prefer-dark-theme", theme, NULL);
+        for (int tick = 0; tick < 20; tick++) { ascolto_tray_step_iteration(&core->tray); g_usleep(5000); }
+        void *surface = surface_create(0, width(p->diagnostics_window), height(p->diagnostics_window));
+        void *context = cairo_create(surface); draw(p->diagnostics_window, context);
+        char path[180]; snprintf(path, sizeof(path), "build/settings-previews/gtk-diagnostics-%s.png", theme ? "dark" : "light");
+        assert(!write_png(surface, path)); cairo_destroy(context); surface_destroy(surface);
+    }
+    void *unified_window = p->settings_window;
+    GSubprocess *pending_task = g_subprocess_new(G_SUBPROCESS_FLAGS_NONE, NULL, "/bin/sleep", "60", NULL);
+    p->diagnostics_task = pending_task;
+    on_menu_settings(NULL, &core->tray);
+    assert(p->settings_window == unified_window && !p->diagnostics_visible && p->diagnostics_task == pending_task);
+    on_menu_diagnostics(NULL, &core->tray);
+    assert(p->settings_window == unified_window && p->diagnostics_visible && p->diagnostics_task == pending_task);
+    assert(p->diagnostics_selected == 45 && p->diagnostics_attention && p->diagnostics_expanded);
+    g_subprocess_force_exit(p->diagnostics_task); g_clear_object(&p->diagnostics_task);
+    settings_delete(p->settings_window, NULL, &core->tray); assert(!p->diagnostics_visible);
     s_gtk_widget_hide(p->settings_window);
 }
 

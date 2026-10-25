@@ -13,6 +13,10 @@ behavior at its native boundary; see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## UI and lifecycle
 
+- Launch as a menu-bar accessory. Presenting the shared app window promotes the
+  app to regular activation so the Dock and Command-Tab can restore it. Keep
+  that policy while inactive, hidden or minimized; return to accessory mode only
+  when the window closes. Dock reopen restores the same window and section.
 - Session actions and capture shutdown run on the serial background action queue.
   Never wait for CoreAudio startup, draining or metadata queries on the UI thread;
   use monitor-cached metadata when opening a session.

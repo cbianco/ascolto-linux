@@ -1,0 +1,7 @@
+cf704f8cfa90e3f0a76f9ffc05998bdf00ba9ae983192c14a85a3a5eb008b367  build/stt-bench/models/cohere-transcribe-int8-hf/encoder.int8.onnx
+bcf1b7148c8518ae52df1ad2d2fc2b4e89261ea23e6c874eef1d9f55bcbaa4a3  build/stt-bench/models/cohere-transcribe-int8-hf/encoder.int8.onnx.data
+8372ca6c8ff4db8b916ca3592f5c757a715e691b9edec751ba19b29fc854baf9  build/stt-bench/models/cohere-transcribe-int8-hf/decoder.int8.onnx
+013ede043ae2480e3a9205cc34550d9686100cc682bacc90f702facdfbb93035  build/stt-bench/models/cohere-transcribe-int8-hf/tokens.txt
+ee098d8b419d49b92101cde3c970a333b361066eb2d79a11ab480a116552b908  build/stt-bench/runtimes/sherpa-onnx-v1.13.8-osx-arm64-shared-lib/lib/libsherpa-onnx-c-api.dylib
+3567d114f7299d559993e536d605a6f46d7bc9d2542004accc80ee9bf5457f0b  build/stt-bench/runtimes/sherpa-onnx-v1.13.8-osx-arm64-shared-lib/lib/libonnxruntime.dylib
+2a1b95084be8fd1deb3228fcad2fd3f7f0258b64582f7402281ec174c7b7f4ce  build/stt-bench/runtimes/cohere-sherpa/include/c-api.h

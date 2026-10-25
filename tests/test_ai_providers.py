@@ -97,6 +97,39 @@ class ProviderTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, "free_tier_restricted")
                 self.assertNotIn(payload["message"], str(caught.exception))
                 self.assertNotIn("ChatGPT", str(caught.exception))
+                self.assertEqual(caught.exception.details, {'http_status': 403})
+
+    def test_structured_recap_requires_catalog_support_and_parameter_aware_routing(self):
+        self.connect(); self.select()
+        schema = {'type': 'object', 'properties': {}, 'additionalProperties': False}
+        with self.assertRaises(ai.ProviderError) as error:
+            self.manager.complete('system', 'transcript', 'session', response_schema=schema)
+        self.assertEqual(error.exception.code, 'unsupported_capability')
+        settings = self.manager.load()
+        next(m for m in settings['profiles']['openrouter']['models'] if m['id'] == 'model-a')['supported_parameters'] = ['response_format', 'structured_outputs']
+        self.manager.save(settings)
+        self.manager.complete('system', 'transcript', 'session', response_schema=schema)
+        body = self.transport.requests[-1][2]['body']
+        self.assertEqual(body['model'], 'model-a')
+        self.assertEqual(body['response_format']['json_schema']['schema'], schema)
+        self.assertTrue(body['response_format']['json_schema']['strict'])
+        self.assertEqual(body['provider'], {'require_parameters': True})
+        self.manager.complete('system', 'transcript', 'session')
+        self.assertNotIn('response_format', self.transport.requests[-1][2]['body'])
+
+    def test_openrouter_generation_error_inside_success_response_is_sanitized(self):
+        self.connect(); self.select()
+        for wrapped in (False, True):
+            detail = {'code': 503, 'message': 'private provider body',
+                      'metadata': {'error_type': 'timeout', 'raw': 'private transcript or credential'}}
+            self.transport.response = {'choices': [{'finish_reason': 'error', 'error': detail}]} if wrapped else {'error': detail}
+            with self.assertRaises(ai.ProviderError) as error:
+                self.manager.complete('system', 'transcript', 'session')
+            self.assertEqual(error.exception.code, 'provider_timeout')
+            self.assertEqual(error.exception.details['upstream_status'], 503)
+            self.assertEqual(error.exception.details['error_type'], 'timeout')
+            self.assertNotIn('http_status', error.exception.details)
+            self.assertNotIn('private', str(error.exception) + json.dumps(error.exception.details))
     def select(self, provider="openrouter", model="model-a"):
         return self.manager.handle({"action": "use", "provider": provider, "model": model, "acknowledge_go_policy": provider == "opencode-go"})
     def openai(self, expiry=0):

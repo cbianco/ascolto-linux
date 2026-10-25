@@ -3,6 +3,7 @@
 
 #include "ascolto/types.h"
 #include "ascolto/storage.h"
+#include "ascolto/local_stt.h"
 #include "ascolto/audio_processing.h"
 #include "ascolto/diarizer.h"
 #include "ascolto/whistle_engine.h"
@@ -56,6 +57,9 @@ struct ascolto_core {
     int64_t last_sys_voiced_sample;
 
     ascolto_whistle_engine_t whistle;
+    ascolto_local_models_t *local_models;
+    ascolto_local_stt_t local_stt;
+    bool transcription_error;
     ascolto_diarizer_t diarizer;
     ascolto_audio_backend_t audio;
     ascolto_tray_ui_t tray;

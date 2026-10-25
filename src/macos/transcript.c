@@ -31,6 +31,7 @@ static char *session_metadata(ascolto_live_app_t *app, bool manual,
         app->mic_echo_turns_suppressed, (long long)app->capture_dropped_samples,
         (long long)app->capture_padded_samples[0],
         (long long)app->capture_padded_samples[1]);
+  fprintf(out, ",\"local_model\":\"%s\",\"transcription_failed\":%s", app->local_stt.id, app->transcription_error ? "true" : "false");
   const char *keys[] = {"mic",          "in_app",         "out_app",
                         "window_title", "calendar_title", "calendar_organizer",
                         "attendees",    "calendar_notes", "audio_m4a"};
@@ -127,11 +128,14 @@ void ascolto_transcript_write_turn(ascolto_live_app_t *app,
                                  .text = tr->text,
                                  .language = tr->language,
                                  .source_app = source};
+  char timing[32];
+  if (app->local_stt.context) snprintf(timing, sizeof(timing), "null");
+  else snprintf(timing, sizeof(timing), "%.1f", tr->ttft_ms);
   char metadata[512];
   snprintf(metadata, sizeof(metadata),
            "{\"is_new_speaker\":%s,\"similarity\":%.3f,\"f0_hz\":%.1f,\"rms_"
-           "db\":%.1f,\"ttft_ms\":%.1f}",
-           is_new ? "true" : "false", sim, vp->f0_mean_hz, rms_db, tr->ttft_ms);
+           "db\":%.1f,\"ttft_ms\":%s,\"local_model\":\"%s\"}",
+           is_new ? "true" : "false", sim, vp->f0_mean_hz, rms_db, timing, app->local_stt.id);
   turn.metadata_json = metadata;
   int rc = ascolto_storage_write(app->config.config_path,
                                  &app->files.storage_writer, &turn);
@@ -155,17 +159,17 @@ void ascolto_transcript_close(ascolto_live_app_t *app, double elapsed) {
   char *metadata = session_metadata(app, app->manual_override_active, elapsed);
   int rc = ascolto_storage_state(
       app->config.config_path, app->files.database_session,
-      app->files.storage_error ? "failed" : "completed", metadata);
+      app->files.storage_error || app->transcription_error ? "failed" : "completed", metadata);
   free(metadata);
   if (rc)
     app->files.storage_error = rc;
   bool use_ai = ascolto_ai_automatic_enabled(app->config.config_path);
-  if (!app->files.storage_error && app->session_utterance_count > 0)
+  if (!app->files.storage_error && !app->transcription_error && app->session_utterance_count > 0)
     ascolto_ai_recap_start(app->config.config_path, app->files.md_path, true);
   if (app->files.save_audio && app->files.mic_raw_path[0] &&
       app->files.sys_raw_path[0]) {
     ascolto_config_t config = app->config;
-    if (use_ai || app->files.storage_error)
+    if (use_ai || app->files.storage_error || app->transcription_error)
       config.cloud_recap = false;
     ascolto_archive_finalize(&config, app->files.mic_raw_path,
                              app->files.sys_raw_path, app->files.m4a_path,

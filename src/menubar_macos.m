@@ -6,6 +6,8 @@
 #include "ascolto/macos_control.h"
 #import "macos/status_icon.h"
 #import "macos/settings.h"
+#import "macos/activity.h"
+#import "macos/app_icon.h"
 #include "ascolto/ai_settings.h"
 
 static NSString* menu_text(const char* text) {
@@ -58,6 +60,7 @@ static NSString* menu_text(const char* text) {
         [_statusItem.button addSubview:_recordingBadge];
 
         [self rebuildMenu];
+        [self prepareSettings];
         [self updateStatusBarTitle];
         [self refreshDeviceInventory];
 
@@ -189,6 +192,12 @@ static NSString* menu_text(const char* text) {
             heading = @"Updating settings…";
         }
     }
+    ascolto_local_models_snapshot_t localModels;
+    ascolto_local_models_snapshot(_app->local_models, &localModels);
+    if (localModels.error[0] && !pending) {
+        heading = @"Local transcription needs attention";
+        subtitle = menu_text(localModels.error);
+    }
     if (snapshot.settings_error && !pending) {
         heading = @"Settings could not be saved";
         subtitle = @"Previous settings kept. Review database permissions.";
@@ -316,6 +325,12 @@ static NSString* menu_text(const char* text) {
 
     [_statusMenu addItem:[NSMenuItem separatorItem]];
 
+    [_statusMenu addItem:[self itemWithTitle:@"Activity & diagnostics…" action:@selector(onActivity:) key:@""]];
+    if (_settingsWindow.attentionCount > 0) {
+        NSMenuItem* attention=[self itemWithTitle:[NSString stringWithFormat:@"%ld calls need attention…",(long)_settingsWindow.attentionCount] action:@selector(onActivity:) key:@""];
+        [_statusMenu addItem:attention];
+    }
+
     /* 3. Language Submenu */
     NSMenu* langMenu = [[NSMenu alloc] initWithTitle:@"Lingua"];
     struct { const char* code; const char* label; } langs[] = {
@@ -422,8 +437,9 @@ static NSString* menu_text(const char* text) {
     [_statusMenu addItem:quitItem];
 }
 
-- (void)onSettings:(id)sender {
-    (void)sender;
+- (void)onActivity:(id)sender { (void)sender; [self prepareSettings]; [_settingsWindow showActivity]; }
+
+- (void)prepareSettings {
     if (!_settingsWindow) {
         __weak AscoltoMenuController* weakSelf = self;
         _settingsWindow = [[AscoltoSettingsWindow alloc] initWithOptions:^NSDictionary* {
@@ -432,6 +448,14 @@ static NSString* menu_text(const char* text) {
             ascolto_live_snapshot_t snapshot;
             ascolto_live_app_read_snapshot(owner.app, &snapshot);
             NSMutableDictionary* values = [owner.settingsMenus mutableCopy];
+            values[@"localModelAction"] = ^(NSString* action, NSString* model) {
+                [owner performSessionAction:^(ascolto_live_app_t* app) {
+                    if ([action isEqual:@"use"]) ascolto_local_models_select(app->local_models, model.UTF8String);
+                    else if ([action isEqual:@"remove"]) ascolto_local_models_remove(app->local_models, model.UTF8String);
+                    else ascolto_local_models_download(app->local_models, model.UTF8String);
+                }];
+            };
+            values[@"localModels"] = [NSValue valueWithPointer:owner.app->local_models];
             values[@"config"] = menu_text(snapshot.config.config_path);
             values[@"output"] = menu_text(snapshot.config.output_dir);
             values[@"automatic"] = @(snapshot.config.auto_trigger_mic);
@@ -442,7 +466,24 @@ static NSString* menu_text(const char* text) {
             return values;
         } target:self];
     }
-    [_settingsWindow showSettings];
+}
+
+- (void)onSettings:(id)sender {
+    (void)sender; [self prepareSettings]; [_settingsWindow showSettings];
+}
+
+- (BOOL)applicationShouldHandleReopen:(NSApplication*)sender hasVisibleWindows:(BOOL)visible {
+    (void)sender; (void)visible;
+    [self onSettings:nil];
+    return YES;
+}
+
+- (void)applicationDidBecomeActive:(NSNotification*)notification {
+    (void)notification;
+    if (NSApp.activationPolicy==NSApplicationActivationPolicyRegular) {
+        BOOL applied=ascolto_apply_application_icon();
+        ascolto_diagnostic("Application icon active applied=%d",applied);
+    }
 }
 
 - (void)onSelectAIRecap:(id)sender {
@@ -649,6 +690,7 @@ static NSString* menu_text(const char* text) {
 }
 
 - (void)onQuit:(id)sender {
+    [_settingsWindow stopActivityRefresh];
     [_settingsWindow cancelWorker];
     (void)sender;
     [NSApp terminate:nil];
@@ -656,6 +698,7 @@ static NSString* menu_text(const char* text) {
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender {
     [_settingsWindow cancelWorker];
+    [_settingsWindow stopActivityRefresh];
     if (_terminationPending) return NSTerminateLater;
     _terminationPending = YES;
     [_refreshTimer invalidate];
@@ -691,6 +734,27 @@ int ascolto_run_menubar_app(ascolto_live_app_t* app, ascolto_macos_capture_t** c
     @autoreleasepool {
         NSApplication* nsApp = [NSApplication sharedApplication];
         [nsApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        BOOL iconApplied=ascolto_apply_application_icon();
+        ascolto_diagnostic("Application icon startup applied=%d",iconApplied);
+        NSMenu* mainMenu=[[NSMenu alloc] initWithTitle:@"Ascolto"];
+        NSMenuItem* applicationItem=[[NSMenuItem alloc] initWithTitle:@"Ascolto" action:nil keyEquivalent:@""];
+        NSMenu* applicationMenu=[[NSMenu alloc] initWithTitle:@"Ascolto"];
+        [applicationMenu addItemWithTitle:@"Hide Ascolto" action:@selector(hide:) keyEquivalent:@"h"];
+        NSMenuItem* hideOthers=[applicationMenu addItemWithTitle:@"Hide Others" action:@selector(hideOtherApplications:) keyEquivalent:@"h"];
+        hideOthers.keyEquivalentModifierMask=NSEventModifierFlagCommand|NSEventModifierFlagOption;
+        [applicationMenu addItemWithTitle:@"Show All" action:@selector(unhideAllApplications:) keyEquivalent:@""];
+        [applicationMenu addItem:NSMenuItem.separatorItem];
+        [applicationMenu addItemWithTitle:@"Quit Ascolto" action:@selector(terminate:) keyEquivalent:@"q"];
+        applicationItem.submenu=applicationMenu; [mainMenu addItem:applicationItem];
+        NSMenuItem* windowItem=[[NSMenuItem alloc] initWithTitle:@"Window" action:nil keyEquivalent:@""];
+        NSMenu* windowMenu=[[NSMenu alloc] initWithTitle:@"Window"];
+        [windowMenu addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+        [windowMenu addItemWithTitle:@"Zoom" action:@selector(performZoom:) keyEquivalent:@""];
+        NSMenuItem* fullScreen=[windowMenu addItemWithTitle:@"Toggle Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
+        fullScreen.keyEquivalentModifierMask=NSEventModifierFlagCommand|NSEventModifierFlagControl;
+        [windowMenu addItemWithTitle:@"Close" action:@selector(performClose:) keyEquivalent:@"w"];
+        windowItem.submenu=windowMenu; [mainMenu addItem:windowItem];
+        nsApp.mainMenu=mainMenu; nsApp.windowsMenu=windowMenu;
 
         AscoltoMenuController* controller = [[AscoltoMenuController alloc] initWithApp:app];
         nsApp.delegate = controller;

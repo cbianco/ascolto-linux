@@ -161,14 +161,15 @@ void ascolto_whistle_destroy(ascolto_whistle_engine_t *eng) {
     eng->model_loaded = false;
 }
 
-int ascolto_whistle_process_segment(
+static int process_segment(
     ascolto_whistle_engine_t *eng,
     const float *pcm,
     size_t num_samples,
     const char *language,
     const char *keywords,
     const char *hint_text,
-    ascolto_whistle_result_t *out_res
+    ascolto_whistle_result_t *out_res,
+    bool embeddings_only
 ) {
     if (!eng || !pcm || num_samples == 0 || !out_res) return -1;
     memset(out_res, 0, sizeof(*out_res));
@@ -189,7 +190,7 @@ int ascolto_whistle_process_segment(
 
         char json_out[32768];
         json_out[0] = '\0';
-        int trc = needle_transcribe(
+        int trc = embeddings_only ? -1 : needle_transcribe(
             pcm,
             (int)clipped,
             lang_arg,
@@ -234,6 +235,15 @@ int ascolto_whistle_process_segment(
     }
 
     return 0;
+}
+
+int ascolto_whistle_process_segment(ascolto_whistle_engine_t *eng, const float *pcm, size_t n,
+    const char *language, const char *keywords, const char *hint, ascolto_whistle_result_t *out) {
+    return process_segment(eng, pcm, n, language, keywords, hint, out, false);
+}
+int ascolto_whistle_embed_segment(ascolto_whistle_engine_t *eng, const float *pcm, size_t n,
+    ascolto_whistle_result_t *out) {
+    return process_segment(eng, pcm, n, NULL, NULL, NULL, out, true);
 }
 
 void ascolto_whistle_result_free(ascolto_whistle_result_t *res) {

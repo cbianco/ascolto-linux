@@ -66,12 +66,25 @@ typedef struct {
     void *indicator;
     void *menu;
     void *config_menu;
+    void *diagnostics_window, *diagnostics_root, *diagnostics_list, *diagnostics_detail;
+    void *diagnostics_detail_scroll, *settings_layout, *settings_scroll;
+    void *diagnostics_preview, *diagnostics_columns, *item_diagnostics;
+    JsonObject *diagnostics_state;
+    GSubprocess *diagnostics_worker, *diagnostics_task, *diagnostics_cancel;
+    guint diagnostics_timer, diagnostics_restore_source;
+    gint64 diagnostics_selected;
+    bool diagnostics_attention, diagnostics_visible, diagnostics_expanded;
+    char *diagnostics_message;
     void *settings_window, *settings_page;
     void *settings_auto, *settings_save, *settings_legacy, *settings_tts, *settings_keywords;
     void *settings_archive_label;
     void *ai_key, *ai_model, *ai_language, *ai_auto, *ai_account, *ai_use;
     void *stt_model, *stt_consent, *stt_auto;
     int settings_category;
+    bool settings_cloud_tab;
+    uint64_t local_revision;
+    bool local_action_pending;
+    void *local_models_box;
     bool settings_building;
     JsonObject *ai_state;
     GSubprocess *ai_worker;
@@ -169,7 +182,7 @@ static void apply_snapshot_to_gtk_main_thread(ascolto_tray_ui_t *ui);
 
 typedef enum { MENU_START, MENU_STOP, MENU_PAUSE, MENU_RESUME, MENU_AUTO,
     MENU_AUDIO, MENU_CLOUD, MENU_TTS, MENU_LANGUAGE, MENU_MIC, MENU_SYS, MENU_SPEAKERS,
-    MENU_RECAP, MENU_MP3, MENU_LEGACY_RECAP, MENU_KEYWORDS, MENU_OUTPUT } menu_action_t;
+    MENU_RECAP, MENU_MP3, MENU_LEGACY_RECAP, MENU_KEYWORDS, MENU_OUTPUT, MENU_LOCAL_USE, MENU_LOCAL_DOWNLOAD, MENU_LOCAL_REMOVE } menu_action_t;
 typedef struct { ascolto_tray_ui_t *ui; menu_action_t kind; char value[1024]; } menu_request_t;
 
 static void menu_action_worker(gpointer data, gpointer unused) {
@@ -202,6 +215,9 @@ static void menu_action_worker(gpointer data, gpointer unused) {
         }
         case MENU_LEGACY_RECAP: result = ascolto_core_run_recap(c, NULL); break;
         case MENU_KEYWORDS: result = ascolto_core_set_keywords(c, r->value); break;
+        case MENU_LOCAL_USE: result = ascolto_local_models_select(c->local_models, r->value); break;
+        case MENU_LOCAL_DOWNLOAD: result = ascolto_local_models_download(c->local_models, r->value); break;
+        case MENU_LOCAL_REMOVE: result = ascolto_local_models_remove(c->local_models, r->value); break;
         case MENU_OUTPUT: result = ascolto_core_set_output_directory(c, r->value); break;
         case MENU_MP3: result = ascolto_core_make_mp3(c, NULL); break;
     }
@@ -453,7 +469,10 @@ static void on_open_latest(void *widget, gpointer data) {
     if (snap.recent_files_count) launch_path_nonblocking(snap.recent_files[0], false);
 }
 
+static void on_menu_diagnostics(void *widget, gpointer data);
+static void diagnostics_show_section(ascolto_tray_ui_t *ui);
 #include "linux/settings.inc"
+#include "linux/diagnostics.inc"
 
 static bool init_gtk_indicator(ascolto_tray_ui_t *ui) {
     gtk_tray_priv_t *p = (gtk_tray_priv_t *)calloc(1, sizeof(gtk_tray_priv_t));
@@ -582,6 +601,7 @@ static bool init_gtk_indicator(ascolto_tray_ui_t *ui) {
     p->menu = visible_menu;
     menu_item(p, details, "Open latest session folder…", G_CALLBACK(on_menu_open_session_folder), ui);
     menu_item(p, p->menu, "Settings…", G_CALLBACK(on_menu_settings), ui);
+    p->item_diagnostics = menu_item(p, p->menu, "Activity & diagnostics…", G_CALLBACK(on_menu_diagnostics), ui);
     p->gtk_menu_shell_append(p->menu, p->gtk_separator_menu_item_new());
     p->item_open_latest = menu_item(p, p->menu, "Open latest transcript", G_CALLBACK(on_open_latest), ui);
     menu_item(p, p->menu, "Open transcripts folder…", G_CALLBACK(on_menu_open_folder), ui);
@@ -591,6 +611,8 @@ static bool init_gtk_indicator(ascolto_tray_ui_t *ui) {
     menu_item(p, p->menu, "Quit Ascolto", G_CALLBACK(on_menu_quit), ui);
     p->gtk_widget_show_all(p->menu);
     p->app_indicator_set_menu(p->indicator, p->menu);
+    p->diagnostics_timer = g_timeout_add_seconds(5, diagnostics_tick, ui);
+    diagnostics_refresh(NULL, ui);
     return true;
 }
 
@@ -622,7 +644,8 @@ static void apply_snapshot_to_gtk_main_thread(ascolto_tray_ui_t *ui) {
     int failed = g_atomic_int_get(&p->action_failed);
     const char *progress = snap.menu_stopping || (pending && kind == MENU_STOP) ? "Saving session…" :
         pending && kind == MENU_START ? "Starting transcription…" : "Updating settings…";
-    p->gtk_menu_item_set_label(p->item_status, failed ?
+    ascolto_local_models_snapshot_t local_models;ascolto_local_models_snapshot(ui->core->local_models,&local_models);
+    p->gtk_menu_item_set_label(p->item_status, local_models.error[0] && !busy ? "Local transcription needs attention · open Transcription Settings" : failed ?
         (failed == MENU_RECAP + 1 || failed == MENU_MP3 + 1 ? "Could not generate recap · check setup" : "Action failed · check diagnostics") :
         busy ? progress : snap.status_text);
     p->gtk_menu_item_set_label(p->item_start_stop, busy ? progress :
@@ -789,6 +812,10 @@ void ascolto_tray_step_iteration(ascolto_tray_ui_t *ui) {
         if (p->settings_window && p->settings_category == 3) settings_build(ui);
         pthread_mutex_lock(&ui->mutex); ui->dirty = true; pthread_mutex_unlock(&ui->mutex);
     }
+    if (p->local_models_box) {
+        ascolto_local_models_snapshot_t models; ascolto_local_models_snapshot(ui->core->local_models, &models);
+        if (models.revision != p->local_revision || p->local_action_pending != !!g_atomic_int_get(&p->action_pending)) settings_render_local_models(ui);
+    }
     apply_snapshot_to_gtk_main_thread(ui);
     int guard = 0;
     while (p->gtk_events_pending && p->gtk_events_pending() && guard++ < 64) {
@@ -820,6 +847,7 @@ void ascolto_tray_destroy(ascolto_tray_ui_t *ui) {
     if (ui->gtk_impl) {
         gtk_tray_priv_t *p = (gtk_tray_priv_t *)ui->gtk_impl;
         settings_cancel(ui);
+        diagnostics_destroy(ui);
         if (p->settings_window) p->gtk_widget_destroy(p->settings_window);
         if (p->ai_state) json_object_unref(p->ai_state);
         g_free(p->ai_message);

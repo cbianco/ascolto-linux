@@ -1,6 +1,7 @@
 #include "ascolto.h"
 #include "ascolto/json.h"
 #import <Cocoa/Cocoa.h>
+#import "../src/macos/settings.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,7 @@
 @property(nonatomic, assign) ascolto_live_app_t *app;
 @property(nonatomic, strong) NSMenu *statusMenu;
 - (void)rebuildMenu;
+- (BOOL)applicationShouldHandleReopen:(NSApplication*)sender hasVisibleWindows:(BOOL)visible;
 @end
 
 static NSMenuItem *find_action(NSMenu *menu, SEL action) {
@@ -82,6 +84,24 @@ int main(void) {
       NSMenuItem *recap =
           find_action(controller.statusMenu, @selector(onRunRecap:));
       assert(open && open.enabled && recap && recap.enabled);
+      [controller performSelector:@selector(onActivity:) withObject:nil];
+      AscoltoSettingsWindow* mainWindow=[controller valueForKey:@"settingsWindow"];
+      NSWindow* original=mainWindow.window;
+      assert(original.visible);
+      [mainWindow setValue:@{} forKey:@"settings"];
+      [controller performSelector:@selector(onSettings:) withObject:nil];
+      assert([controller valueForKey:@"settingsWindow"]==mainWindow);
+      assert(mainWindow.window==original && original.visible);
+      [original miniaturize:nil];
+      assert(NSApp.activationPolicy==NSApplicationActivationPolicyRegular);
+      [controller applicationShouldHandleReopen:NSApp hasVisibleWindows:NO];
+      assert(!original.miniaturized && original.visible && mainWindow.window==original);
+      [controller performSelector:@selector(onActivity:) withObject:nil];
+      NSViewController* activity=[mainWindow valueForKey:@"activity"];
+      assert(activity.view.window==original);
+      [mainWindow stopActivityRefresh];
+      [mainWindow cancelWorker];
+      [original close];
       controller.app = NULL;
       /* A changed future output directory must not hide an existing archive
        * reference. */

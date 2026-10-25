@@ -87,7 +87,8 @@ class FakeManager:
             raise ProviderError("not_connected", "Connect the provider.")
         return {"key": "mock-key-only"}
 
-    def complete(self, instructions, prompt, session_id, provider=None, model=None):
+    def complete(self, instructions, prompt, session_id, provider=None, model=None, response_schema=None):
+        self.response_schema = response_schema
         self.calls.append((provider, model, json.loads(prompt), session_id))
         if self.respond:
             return self.respond(self.calls[-1]), model
@@ -205,6 +206,237 @@ class WorkflowTests(unittest.TestCase):
         self.assert_code("invalid_output", runner.recap, TEXT_SELECTION, turns, self.root)
         self.assertEqual(previous.read_text(), "previous result")
         self.assertFalse((self.root / "recap.ai.md").exists())
+
+    def test_wrong_reference_is_resolved_only_by_a_unique_exact_quote(self):
+        value = empty_notes()
+        value['summary'] = [note(self.turns[0])]
+        value['summary'][0]['evidence'][0]['quote'] = self.turns[1].text
+        self.manager.respond = lambda call: json.dumps(value)
+        result = self.runner.recap(TEXT_SELECTION, self.turns, self.root)
+        event = next(e for e in self.events if e.get('stage') == 'citation_resolved')
+        self.assertEqual((event['chunk'], event['total'], event['section'], event['item'], event['citation']),
+                         (1, 1, 'summary', 1, 1))
+        self.assertEqual(event['reason'], 'quote_in_other_source')
+        self.assertEqual(event['source_index'], 1)
+        self.assertEqual(event['matching_source_index'], 2)
+        self.assertNotIn(self.turns[1].text, json.dumps(self.events))
+        self.assertEqual(result['summary'][0]['evidence'][0]['source_id'], self.turns[1].source_id)
+        self.assertEqual(result['summary'][0]['evidence'][0]['speaker'], self.turns[1].speaker)
+        self.assertEqual(result['requests'], 1)
+        self.assertEqual(result['resolved_citations'], 1)
+        self.assertEqual(value['summary'][0]['evidence'][0]['source_id'], self.turns[0].source_id)
+
+    def test_ambiguous_or_changed_quotations_are_never_resolved_heuristically(self):
+        shared = workflow.Turn('duplicate', 'SYS', 'SPEAKER_3', 4, 5, self.turns[1].text)
+        value = empty_notes()
+        value['summary'] = [note(self.turns[1])]
+        value['summary'][0]['evidence'][0]['source_id'] = 'unknown'
+        result, resolutions = workflow.resolve_exact_citations(value, self.turns + [shared])
+        self.assertEqual(resolutions, [])
+        self.assert_code('invalid_evidence', workflow.validate_recap, result, self.turns + [shared])
+        value['summary'][0]['evidence'][0]['quote'] = self.turns[1].text.lower()
+        result, resolutions = workflow.resolve_exact_citations(value, self.turns)
+        self.assertEqual(resolutions, [])
+
+    def test_reference_resolution_cannot_bypass_owner_validation(self):
+        value = empty_notes()
+        value['actions'] = [{**note(self.turns[1]), 'owner': 'ME', 'due': None}]
+        value['actions'][0]['evidence'][0]['source_id'] = self.turns[0].source_id
+        result, resolutions = workflow.resolve_exact_citations(value, self.turns)
+        self.assertEqual(len(resolutions), 1)
+        self.assert_code('invalid_owner', workflow.validate_recap, result, self.turns)
+
+    def test_structured_output_is_requested_only_when_declared_by_selected_catalog(self):
+        model = self.manager.settings['profiles']['openrouter']['models'][0]
+        model['supported_parameters'] = ['response_format', 'structured_outputs']
+        self.runner.recap(TEXT_SELECTION, self.turns, self.root)
+        self.assertEqual(self.manager.response_schema, workflow.RECAP_SCHEMA)
+
+    def test_non_object_json_fails_as_invalid_output_without_an_unsafe_repair(self):
+        self.manager.respond = lambda call: '[]'
+        self.assert_code('invalid_output', self.runner.recap, TEXT_SELECTION, self.turns, self.root)
+        self.assertEqual(len(self.manager.calls), 1)
+
+    def test_retry_reuses_only_revalidated_matching_chunks_after_a_later_failure(self):
+        turns = [workflow.Turn(f't{i}', 'MIC', 'ME', i, i + 1, 'Word ' * 500) for i in range(3)]
+        runner = workflow.WorkflowRunner(self.manager, self.events.append, input_budget=7000,
+                                         checkpoint_dir=self.root / 'checkpoints', session_id='same-call')
+        respond = self.manager.respond
+        def fail_second(call):
+            if len(self.manager.calls) == 2:
+                raise ProviderError('network_error', 'Provider unavailable.')
+            result = empty_notes()
+            result['summary'] = [note(workflow.Turn(**call[2]['transcript'][0]))]
+            return json.dumps(result)
+        self.manager.respond = fail_second
+        with self.assertRaises(ProviderError) as error:
+            runner.recap(TEXT_SELECTION, turns, self.root)
+        self.assertEqual(error.exception.code, 'network_error')
+        checkpoints = list((self.root / 'checkpoints').glob('*.json'))
+        self.assertEqual(len(checkpoints), 1)
+        self.assertEqual(checkpoints[0].stat().st_mode & 0o777, 0o600)
+        self.manager.respond = respond
+        self.manager.calls.clear()
+        result = runner.recap(TEXT_SELECTION, turns, self.root)
+        self.assertEqual(result['cached_chunks'], 1)
+        self.assertEqual(result['requests'], result['passes'] - 1)
+        self.assertTrue(any(e.get('stage') == 'checkpoint_reused' for e in self.events))
+        # A corrupted cache is never trusted merely because its key matches.
+        saved = json.loads(checkpoints[0].read_text())
+        saved['value']['summary'][0]['evidence'][0]['quote'] = 'Invented cached quote.'
+        checkpoints[0].write_text(json.dumps(saved))
+        self.manager.calls.clear()
+        result = runner.recap(TEXT_SELECTION, turns, self.root)
+        self.assertGreater(result['requests'], 0)
+        self.assertTrue(any(e.get('stage') == 'checkpoint_rejected' for e in self.events))
+
+    def test_whitespace_and_unknown_source_have_distinct_diagnostics(self):
+        value = empty_notes()
+        turn = workflow.Turn('private-source-id', 'MIC', 'ME', 0, 1, 'Ship  on Friday.')
+        value['summary'] = [note(turn)]
+        value['summary'][0]['evidence'][0]['quote'] = 'Ship on Friday.'
+        with self.assertRaises(workflow.WorkflowError) as error:
+            workflow.validate_recap(value, [turn])
+        self.assertEqual(error.exception.details['reason'], 'whitespace_mismatch')
+        value['summary'][0]['evidence'][0]['source_id'] = 'untrusted-provider-text'
+        with self.assertRaises(workflow.WorkflowError) as error:
+            workflow.validate_recap(value, [turn])
+        self.assertEqual(error.exception.details['reason'], 'unknown_source')
+        self.assertNotIn('untrusted-provider-text', json.dumps(error.exception.details))
+
+    def test_citation_repair_keeps_notes_and_selected_model_and_validates_again(self):
+        bad, good = empty_notes(), empty_notes()
+        good['summary'] = [note(self.turns[0], 'Keep this note exactly.')]
+        bad = copy.deepcopy(good)
+        bad['summary'][0]['evidence'][0]['quote'] = 'An invented quotation.'
+        self.manager.respond = lambda call: json.dumps(bad if len(self.manager.calls) == 1 else good)
+        runner = workflow.WorkflowRunner(self.manager, self.events.append, max_repairs=2)
+        result = runner.recap(TEXT_SELECTION, self.turns, self.root)
+        self.assertEqual(result['requests'], 2)
+        self.assertEqual(result['summary'][0]['text'], 'Keep this note exactly.')
+        self.assertEqual(result['summary'][0]['evidence'][0]['quote'], self.turns[0].text)
+        self.assertEqual(len(self.manager.calls), 2)
+        self.assertTrue(all(call[:2] == ('openrouter', 'fixture/text') for call in self.manager.calls))
+        self.assertIn('previous_candidate', self.manager.calls[1][2])
+        self.assertTrue(any(e.get('stage') == 'repair' and e.get('reason') == 'quote_not_in_source' for e in self.events))
+        self.assertNotIn('An invented quotation.', json.dumps(self.events))
+
+    def test_repair_is_bounded_and_cannot_remove_or_rewrite_claims(self):
+        bad = empty_notes()
+        bad['summary'] = [note(self.turns[0], 'A note that must remain.')]
+        bad['summary'][0]['evidence'][0]['quote'] = 'Unsupported quote.'
+        self.manager.respond = lambda call: json.dumps(bad)
+        runner = workflow.WorkflowRunner(self.manager, max_repairs=2)
+        self.assert_code('invalid_evidence', runner.recap, TEXT_SELECTION, self.turns, self.root)
+        self.assertEqual(len(self.manager.calls), 3)
+        self.assertFalse((self.root / 'recap.ai.json').exists())
+        self.manager.calls.clear()
+        self.manager.respond = lambda call: json.dumps(bad if len(self.manager.calls) == 1 else empty_notes())
+        self.assert_code('invalid_output', runner.recap, TEXT_SELECTION, self.turns, self.root)
+        rewritten = copy.deepcopy(bad)
+        rewritten['summary'][0]['text'] = 'Changed note.'
+        self.assert_code('invalid_output', workflow.validate_repair, rewritten, bad)
+
+    def test_citation_repairs_share_the_global_request_budget(self):
+        bad = empty_notes()
+        bad['summary'] = [note(self.turns[0])]
+        bad['summary'][0]['evidence'][0]['source_id'] = 'missing'
+        bad['summary'][0]['evidence'][0]['quote'] = 'A quote absent from every source.'
+        self.manager.respond = lambda call: json.dumps(bad)
+        runner = workflow.WorkflowRunner(self.manager, max_requests=1, max_repairs=2)
+        self.assert_code('request_limit', runner.recap, TEXT_SELECTION, self.turns, self.root)
+        self.assertEqual(len(self.manager.calls), 1)
+
+    def test_repair_preserves_valid_citations_when_model_changes_them(self):
+        original = empty_notes()
+        original['summary'] = [note(self.turns[0], 'Keep the first note.'), note(self.turns[1], 'Keep the second note.')]
+        original['summary'][1]['evidence'][0]['quote'] = 'Invalid quote.'
+        proposed = copy.deepcopy(original)
+        proposed['summary'][0]['evidence'][0]['quote'] = 'A new regression in a valid citation.'
+        proposed['summary'][1]['evidence'][0]['quote'] = self.turns[1].text
+        self.manager.respond = lambda call: json.dumps(original if len(self.manager.calls) == 1 else proposed)
+        result = self.runner.recap(TEXT_SELECTION, self.turns, self.root)
+        self.assertEqual(result['requests'], 2)
+        self.assertEqual(result['summary'][0]['evidence'][0]['quote'], self.turns[0].text)
+        self.assertEqual(result['summary'][1]['evidence'][0]['quote'], self.turns[1].text)
+
+    def test_repair_preserves_supported_assignments_and_uses_redacted_context(self):
+        original = empty_notes()
+        original['actions'] = [{**note(self.turns[0]), 'owner': 'ME', 'due': 'Friday'}]
+        proposed = copy.deepcopy(original)
+        proposed['actions'][0].update(owner=None, due=None)
+        merged = workflow.merge_repair(original, proposed, self.turns)
+        self.assertEqual(merged['actions'][0]['owner'], 'ME')
+        self.assertEqual(merged['actions'][0]['due'], 'Friday')
+        details = {'section': 'actions', 'item': 1, 'citation': 1}
+        context = workflow.repair_context(original, details, self.turns)
+        self.assertEqual(context['cited_turn']['source_id'], self.turns[0].source_id)
+        self.assertEqual(len(context['nearby_turns']), 2)
+
+    def test_joined_quote_can_be_replaced_by_separate_exact_source_citations(self):
+        original = empty_notes()
+        original['summary'] = [note(self.turns[0])]
+        original['summary'][0]['evidence'][0]['quote'] = self.turns[0].text + ' ' + self.turns[1].text
+        corrected = copy.deepcopy(original)
+        corrected['summary'][0]['evidence'] = [note(t)['evidence'][0] for t in self.turns]
+        self.manager.respond = lambda call: json.dumps(original if len(self.manager.calls) == 1 else corrected)
+        result = self.runner.recap(TEXT_SELECTION, self.turns, self.root)
+        self.assertEqual(result['requests'], 2)
+        self.assertEqual(len(result['summary'][0]['evidence']), 2)
+
+    def test_repair_can_neither_drop_valid_evidence_nor_omit_bad_evidence_without_replacement(self):
+        original = empty_notes()
+        original['summary'] = [{'text': 'Keep this claim.', 'evidence': [note(t)['evidence'][0] for t in self.turns]}]
+        corrected = copy.deepcopy(original)
+        corrected['summary'][0]['evidence'] = []
+        merged = workflow.merge_repair(original, corrected, self.turns)
+        self.assertEqual(merged['summary'][0]['evidence'], original['summary'][0]['evidence'])
+        original['summary'][0]['evidence'][1]['quote'] = 'Missing evidence.'
+        corrected['summary'][0]['evidence'] = [note(self.turns[0])['evidence'][0]]
+        merged = workflow.merge_repair(original, corrected, self.turns)
+        self.assert_code('invalid_evidence', workflow.validate_recap, merged, self.turns)
+
+    def test_every_bad_citation_is_reported_in_one_correction_request(self):
+        good = empty_notes()
+        good['summary'] = [note(t, f'Keep note {i}.') for i, t in enumerate(self.turns)]
+        bad = copy.deepcopy(good)
+        for item in bad['summary']:
+            item['evidence'][0]['quote'] = 'Unsupported joined text.'
+        def respond(call):
+            if len(self.manager.calls) == 1:
+                return json.dumps(bad)
+            self.assertEqual(len(call[2]['validation_issues']), 2)
+            self.assertEqual([i['item'] for i in call[2]['validation_issues']], [1, 2])
+            self.assertEqual(len(call[2]['repair_contexts']), 2)
+            return json.dumps(good)
+        self.manager.respond = respond
+        result = self.runner.recap(TEXT_SELECTION, self.turns, self.root)
+        self.assertEqual(result['requests'], 2)
+        self.assertEqual(len(result['summary']), 2)
+
+    def test_repair_cannot_change_action_owner_or_deadline_to_another_value(self):
+        original = empty_notes()
+        original['actions'] = [{**note(self.turns[0]), 'owner': 'ME', 'due': 'Friday'}]
+        updated = copy.deepcopy(original)
+        updated['actions'][0].update(owner='SPEAKER_2')
+        self.assert_code('invalid_output', workflow.validate_repair, updated, original)
+        updated['actions'][0].update(owner=None, due=None)
+        workflow.validate_repair(updated, original)
+
+    def test_malformed_item_fields_are_diagnosed_and_repaired_without_changing_notes(self):
+        good = empty_notes()
+        good['actions'] = [{**note(self.turns[0]), 'owner': None, 'due': None}]
+        bad = copy.deepcopy(good)
+        del bad['actions'][0]['due']
+        bad['actions'][0]['private-unexpected-field'] = 'private provider text'
+        self.manager.respond = lambda call: json.dumps(bad if len(self.manager.calls) == 1 else good)
+        result = self.runner.recap(TEXT_SELECTION, self.turns, self.root)
+        repair = next(e for e in self.events if e.get('stage') == 'repair')
+        self.assertEqual(repair['reason'], 'unexpected_fields')
+        self.assertEqual(repair['missing_fields'], ['due'])
+        self.assertNotIn('private', json.dumps(self.events))
+        self.assertEqual(result['requests'], 2)
+        self.assertEqual(result['actions'][0]['text'], good['actions'][0]['text'])
 
     def test_provisional_and_final_outputs_coexist_and_redact_outbound_identifiers(self):
         turns = [workflow.Turn("t", "MIC", "ME", 0, 1, "Contact me@example.test about the release.")]

@@ -1,0 +1,33 @@
+--- a/tools/stt-bench/voxtral/bench.c
++++ b/tools/stt-bench/voxtral/bench.c
+@@ -88,6 +88,16 @@
+                 else tokens += got;
+                 final_result_ms = bench_now() - start;
+             }
++            /* The upstream feed API suppresses encoder allocation errors. Detect
++             * gross missing coverage even when feed/finish returned success.
++             * Encoder positions advance at 50 Hz, plus the model's padding. */
++            int encoder_positions = ctx->enc_kv_pos_offset + ctx->enc_kv_cache_len;
++            int minimum_audio_positions = clip->n / 320;
++            if (stream && !error && encoder_positions < minimum_audio_positions) {
++                fprintf(stderr, "Incomplete encoder coverage for %s: %d < %d positions\n",
++                        clip->id, encoder_positions, minimum_audio_positions);
++                error = 2;
++            }
+             size_t gpu_bytes = bench_metal_allocated_bytes();
+             size_t gpu_weight_bytes = vox_metal_memory_used();
+             if (stream) vox_stream_free(stream);
+@@ -100,9 +110,11 @@
+             if (first_observed_ms >= 0) fprintf(side, "%.3f", first_observed_ms);
+             else fputs("null", side);
+             fprintf(side, ",\"first_observed_kind\":\"%s\",\"final_result_ms\":%.3f,"
+-                    "\"gpu_allocated_bytes\":%zu,\"gpu_weight_cache_bytes\":%zu,\"chunk_samples\":%d}\n",
++                    "\"gpu_allocated_bytes\":%zu,\"gpu_weight_cache_bytes\":%zu,\"chunk_samples\":%d,"
++                    "\"encoder_positions\":%d,\"minimum_audio_positions\":%d}\n",
+                     chunk ? "incremental_text_poll" : "batch_token_queue_poll",
+-                    final_result_ms, gpu_bytes, gpu_weight_bytes, chunk);
++                    final_result_ms, gpu_bytes, gpu_weight_bytes, chunk,
++                    encoder_positions, minimum_audio_positions);
+             fflush(side);
+             failures += error;
+             free(text);

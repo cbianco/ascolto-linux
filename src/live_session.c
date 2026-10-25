@@ -89,7 +89,7 @@ static void on_live_vad_turn(
     void* userdata
 ) {
     ascolto_live_app_t* app = (ascolto_live_app_t*)userdata;
-    if (!app || !app->whistle || !app->whistle->loaded) return;
+    if (!app || !app->whistle || !app->whistle->loaded || app->transcription_error) return;
 
     ascolto_mic_activity_t activity = app->echo.mic;
     if (channel == ASCOLTO_CHANNEL_MIC) activity = ascolto_mic_activity_take(&app->echo.mic);
@@ -109,16 +109,21 @@ static void on_live_vad_turn(
         }
     }
 
-    ascolto_transcript_result_t tr;
-    int tok = ascolto_whistle_transcribe(
-        app->whistle,
-        pcm,
-        num_samples,
-        app->config.language,
-        kw_buf[0] ? kw_buf : NULL,
-        true,
-        &tr
-    );
+    ascolto_transcript_result_t tr = {0};
+    int tok;
+    if (app->local_stt.context) {
+        ascolto_stt_text_t result;
+        tok = ascolto_local_stt_transcribe(app->local_models, &app->local_stt, pcm, num_samples,
+            app->config.language, kw_buf[0] ? kw_buf : NULL, &result);
+        if (tok) app->transcription_error = true;
+        if (!tok) {
+            snprintf(tr.text, sizeof(tr.text), "%s", result.text);
+            snprintf(tr.language, sizeof(tr.language), "%s", result.language);
+        }
+    } else {
+        tok = ascolto_whistle_transcribe(app->whistle, pcm, num_samples, app->config.language,
+            kw_buf[0] ? kw_buf : NULL, true, &tr);
+    }
     if (tok < 0 || tr.text[0] == '\0') return;
 
     double sys_stream_s = (double)app->vad_sys.total_samples_processed / (double)ASCOLTO_SAMPLE_RATE;
@@ -171,6 +176,8 @@ int ascolto_live_app_init(ascolto_live_app_t* app, ascolto_whistle_t* whistle, c
     if (ascolto_config_load(&app->config, config_path) == -1 || ascolto_config_save(&app->config, config_path)) return -1;
 
     app->whistle = whistle;
+    app->local_models = ascolto_local_models_create(app->config.config_path);
+    if (!app->local_models) return -1;
     ascolto_diarizer_init(&app->diarizer, app->config.diarizer_threshold);
 
     /* Separate VAD tuning for MIC (capture normal desk voice down to -35.5 dB)
@@ -225,7 +232,12 @@ static int start_session_unlocked(ascolto_live_app_t* app, bool is_manual) {
     if (app->state == ASCOLTO_STATE_RECORDING) return 0;
     if (app->state == ASCOLTO_STATE_STOPPING) return -2;
 
-    if (ascolto_transcript_open(app, is_manual)) return -1;
+    if (ascolto_local_stt_begin(app->local_models, &app->local_stt)) return -1;
+    app->transcription_error = false;
+    if (ascolto_transcript_open(app, is_manual)) {
+        ascolto_local_stt_end(app->local_models, &app->local_stt);
+        return -1;
+    }
 
     ascolto_diarizer_init(&app->diarizer, app->config.diarizer_threshold);
     ascolto_online_vad_reset(&app->vad_mic);
@@ -266,6 +278,7 @@ static int stop_session_unlocked(ascolto_live_app_t* app) {
     double elapsed = (double)(app->vad_mic.total_samples_processed > app->vad_sys.total_samples_processed ? app->vad_mic.total_samples_processed : app->vad_sys.total_samples_processed) / ASCOLTO_SAMPLE_RATE;
 
     ascolto_transcript_close(app, elapsed);
+    ascolto_local_stt_end(app->local_models, &app->local_stt);
 
     app->manual_override_active = false;
     app->state = app->config.paused ? ASCOLTO_STATE_PAUSED : ASCOLTO_STATE_IDLE;
@@ -573,4 +586,5 @@ void ascolto_live_app_free(ascolto_live_app_t* app) {
     pthread_mutex_destroy(&app->lock);
     pthread_cond_destroy(&app->session_cond);
     pthread_mutex_destroy(&app->snapshot_lock);
+    ascolto_local_models_destroy(app->local_models);
 }

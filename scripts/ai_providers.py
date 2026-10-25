@@ -25,6 +25,8 @@ import urllib.request
 import uuid
 import webbrowser
 
+from ascolto_job_diagnostics import safe_details
+
 PROVIDERS = ("opencode-zen", "opencode-go", "openrouter", "openai")
 NAMES = {"opencode-zen": "OpenCode Zen", "opencode-go": "OpenCode Go",
          "openrouter": "OpenRouter", "openai": "OpenAI"}
@@ -36,9 +38,10 @@ LANGUAGES = ("Italian", "English", "German", "French", "Spanish", "Dutch", "Poli
 
 
 class ProviderError(Exception):
-    def __init__(self, code, message):
+    def __init__(self, code, message, **details):
         super().__init__(message)
         self.code = code
+        self.details = safe_details(details)
 
 
 class SecureStore:
@@ -244,22 +247,47 @@ class Transport:
 
 
 def http_error(status, code=""):
+    def failure(error_code, message):
+        return ProviderError(error_code, message, http_status=status)
     if status == 403 and code == "FreeTierError":
-        return ProviderError("free_tier_restricted", "OpenCode restricts this free model to its own client. Choose a model available to third-party API clients in AI providers. Your current selection and saved key have been kept.")
+        return failure("free_tier_restricted", "OpenCode restricts this free model to its own client. Choose a model available to third-party API clients in AI providers. Your current selection and saved key have been kept.")
     if code in ("subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable"):
-        return ProviderError("usage_limit", "ChatGPT usage is unavailable or its limit has been reached. Open Manage usage to review your plan and app limit.")
+        return failure("usage_limit", "ChatGPT usage is unavailable or its limit has been reached. Open Manage usage to review your plan and app limit.")
     if code in ("invalid_grant", "invalid_token") or status == 401:
-        return ProviderError("authentication_failed", "The credential was rejected or expired. Verify the key or sign in again; the previous connection has been kept.")
+        return failure("authentication_failed", "The credential was rejected or expired. Verify the key or sign in again; the previous connection has been kept.")
     if status == 403:
-        return ProviderError("permission_denied", "This account does not have permission for the selected provider or model. Review access with the provider; the saved connection has been kept.")
+        return failure("permission_denied", "This account does not have permission for the selected provider or model. Review access with the provider; the saved connection has been kept.")
     if status in (402, 429):
-        return ProviderError("usage_limit", "Provider credits or usage limits prevent this request. Review usage with the provider.")
-    return ProviderError("provider_error", f"The provider could not complete this request (HTTP {status}). Try again later.")
+        return failure("usage_limit", "Provider credits or usage limits prevent this request. Review usage with the provider.")
+    return failure("provider_error", f"The provider could not complete this request (HTTP {status}). Try again later.")
 
 
 def safe_opencode_url(url):
     parsed = urllib.parse.urlsplit(url)
     return parsed.scheme == "https" and parsed.netloc == "opencode.ai" and parsed.path.startswith("/inference/") and not parsed.query and not parsed.fragment and ".." not in parsed.path
+
+
+def check_openrouter_error(data):
+    """HTTP 200 can still carry a generation error; never retain its raw body."""
+    choices = data.get('choices')
+    first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    detail = data.get('error') or first.get('error')
+    if not isinstance(detail, dict):
+        return
+    metadata = detail.get('metadata') if isinstance(detail.get('metadata'), dict) else {}
+    kind = metadata.get('error_type')
+    status = detail.get('code')
+    error = http_error(status) if type(status) is int and 100 <= status <= 599 else ProviderError('provider_error', 'The selected provider returned a generation error.')
+    # This is the embedded upstream status, not the transport's HTTP status.
+    error.details.pop('http_status', None)
+    error.details.update(safe_details({'upstream_status': status, 'error_type': kind, 'finish_reason': first.get('finish_reason')}))
+    if kind == 'timeout':
+        error.code = 'provider_timeout'
+        error.args = ('The selected provider timed out while generating the recap. Retry explicitly when it is available.',)
+    elif kind in ('provider_overloaded', 'provider_unavailable'):
+        error.code = 'provider_unavailable'
+        error.args = ('The selected provider is temporarily unavailable. No provider or model fallback was used.',)
+    raise error
 
 
 def opencode_api(config, metadata):
@@ -578,13 +606,24 @@ class ProviderManager:
 
     def handle(self, request):
         operation = request.get("action", "status")
+        if operation in ("diagnostics", "cancel_job"):
+            # Activity polling and cancellation never read credentials or wait on
+            # the provider-settings lock held by an inference request.
+            from ascolto_runtime import handle_request
+            try:
+                result = handle_request(self, request)
+            except Exception as error:
+                if hasattr(error, "code"):
+                    raise ProviderError(error.code, str(error), **safe_details(getattr(error, 'details', {}))) from None
+                raise ProviderError("storage_error", "Activity metadata could not be read or updated. Existing files have been kept.") from None
+            return {"ok": True, "result": result, "message": result.get("message", "")}
         if operation in ("archive_path", "refresh_transcription_models", "transcription_preferences", "recap", "provisional_recap", "transcription", "plan_transcription", "keywords", "section"):
             from ascolto_runtime import handle_request
             try:
                 result = handle_request(self, request)
             except Exception as error:
                 if hasattr(error, "code"):
-                    raise ProviderError(error.code, str(error)) from None
+                    raise ProviderError(error.code, str(error), **safe_details(getattr(error, 'details', {}))) from None
                 raise ProviderError("storage_error", "The task could not update its database or local artifacts. Existing files have been kept.") from None
             with self.locked():
                 settings = self.load()
@@ -645,7 +684,7 @@ class ProviderManager:
                 raise ProviderError("invalid_request", "Unknown AI settings action.")
             return {"ok": True, "settings": self.status(settings), "message": warning}
 
-    def complete(self, instructions, prompt, session_id, provider=None, model=None):
+    def complete(self, instructions, prompt, session_id, provider=None, model=None, response_schema=None):
         # All callers hold this lock through refresh and inference: disconnect cannot
         # race a stale token replacement or re-enable a removed connection.
         with self.locked():
@@ -657,6 +696,11 @@ class ProviderManager:
             model = model or profile.get("model")
             if not model or not any(m["id"] == model for m in profile.get("models", [])):
                 raise ProviderError("model_required", "Choose an available provider model in Settings.")
+            if response_schema is not None:
+                metadata = next(m for m in profile['models'] if m['id'] == model)
+                parameters = metadata.get('supported_parameters') or []
+                if provider != 'openrouter' or not all(p in parameters for p in ('response_format', 'structured_outputs')):
+                    raise ProviderError('unsupported_capability', 'This provider/model does not declare structured recap output support.')
             credential = self.get_credential(provider, settings)
             token = credential.get("key") or credential["access_token"]
             if provider == "openai":
@@ -678,7 +722,7 @@ class ProviderManager:
             if family == "messages":
                 data = self.transport.request(base + "/messages", token, body={"model": model, "system": instructions, "max_tokens": 8192, "messages": [{"role": "user", "content": prompt}]}, headers={**headers, "anthropic-version": "2023-06-01"})
                 if data.get("stop_reason") not in ("end_turn", "stop_sequence"):
-                    raise ProviderError("incomplete_response", "The recap was truncated or interrupted. The previous recap has been kept.")
+                    raise ProviderError("incomplete_response", "The recap was truncated or interrupted. The previous recap has been kept.", finish_reason=data.get('stop_reason'))
                 text = "".join(c.get("text", "") for c in data.get("content", []) if c.get("type") == "text")
             elif family == "google":
                 data = self.transport.request(base + "/models/" + urllib.parse.quote(model, safe="") + ":generateContent", token, body={"system_instruction": {"parts": [{"text": instructions}]}, "contents": [{"role": "user", "parts": [{"text": prompt}]}]}, headers=headers)
@@ -687,10 +731,18 @@ class ProviderManager:
                     raise ProviderError("incomplete_response", "The recap was truncated, filtered or interrupted. The previous recap has been kept.")
                 text = "".join(p.get("text", "") for c in candidates for p in c.get("content", {}).get("parts", []))
             else:
-                data = self.transport.request(base + "/chat/completions", token, body={"model": model, "messages": [{"role": "system", "content": instructions}, {"role": "user", "content": prompt}], "stream": False}, headers=headers)
+                body = {"model": model, "messages": [{"role": "system", "content": instructions}, {"role": "user", "content": prompt}], "stream": False}
+                if response_schema is not None:
+                    body['response_format'] = {'type': 'json_schema', 'json_schema': {'name': 'meeting_recap', 'strict': True, 'schema': response_schema}}
+                    body['provider'] = {'require_parameters': True}
+                data = self.transport.request(base + "/chat/completions", token, body=body, headers=headers)
+                if provider == 'openrouter':
+                    check_openrouter_error(data)
                 choices = data.get("choices", [])
-                if not choices or choices[0].get("finish_reason") not in ("stop", "end_turn"):
-                    raise ProviderError("incomplete_response", "The recap response was interrupted or incomplete. The previous recap has been kept.")
+                if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                    raise ProviderError('invalid_response', 'The provider did not return a completion choice.', reason='missing_choices', choice_count=len(choices) if isinstance(choices, list) else 0)
+                if choices[0].get("finish_reason") not in ("stop", "end_turn"):
+                    raise ProviderError("incomplete_response", "The recap response was interrupted or incomplete. The previous recap has been kept.", finish_reason=choices[0].get('finish_reason'), reason='unsupported_finish_reason', choice_count=len(choices))
                 text = choices[0].get("message", {}).get("content", "")
             if not isinstance(text, str) or not text.strip():
                 raise ProviderError("empty_response", "The provider returned no recap text. The previous recap has been kept.")
@@ -743,7 +795,7 @@ def main(argv=None):
             raise ValueError()
         result = ProviderManager(args.config).handle(request)
     except ProviderError as error:
-        result = {"ok": False, "error": error.code, "message": str(error)}
+        result = {"ok": False, "error": error.code, "message": str(error), "details": error.details}
     except Exception:
         result = {"ok": False, "error": "settings_error", "message": "AI settings could not be updated. The saved connection has been kept. Check the settings directory permissions."}
     print(json.dumps(result, ensure_ascii=False), flush=True)

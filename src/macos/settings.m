@@ -1,5 +1,8 @@
 #import "settings.h"
+#import "activity.h"
+#import "app_icon.h"
 #include "ascolto/ai_settings.h"
+#include "ascolto/local_stt.h"
 
 /* Explicit foreground drawing keeps the branded button readable in key and
  * inactive windows, independently of AppKit's bezel/tint rendering. */
@@ -38,11 +41,19 @@
 }
 @end
 
+@interface AscoltoSettingsCanvas : NSView
+@end
+@implementation AscoltoSettingsCanvas
+- (BOOL)isFlipped { return YES; }
+@end
+
 @interface AscoltoSettingsWindow () <NSWindowDelegate, NSMenuDelegate>
 @property (copy) NSDictionary* (^options)(void);
 @property (weak) id actionTarget;
 @property NSView* page;
 @property NSView* sidebar;
+@property NSScrollView* pageScroll;
+@property NSView* canvas;
 @property BOOL nativeMenuTracking;
 @property NSMutableArray<NSPopUpButton*>* nativePopups;
 @property NSString* category;
@@ -72,48 +83,82 @@
 @property NSString* message;
 @property NSString* pendingTask;
 @property NSString* latestAIOutput;
+@property NSInteger transcriptionTab;
+@property NSView* localRows;
+@property uint64_t localRevision;
+@property BOOL renderingLocal;
+@property BOOL lastLocalBusy;
+@property AscoltoActivityViewController* activity;
+@property BOOL userNavigated;
+
 @end
 
 @implementation AscoltoSettingsWindow
 
 - (instancetype)initWithOptions:(NSDictionary* (^)(void))options target:(id)target {
     NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1020, 780)
-        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
         backing:NSBackingStoreBuffered defer:NO];
     self = [super initWithWindow:window];
     if (self) {
         _options = [options copy]; _actionTarget = target;
         _provider = @"opencode-zen";
         _category = @"AI providers";
-        window.title = @"Ascolto Settings";
+        window.title = @"Ascolto";
         window.delegate = self;
         window.releasedWhenClosed = NO;
+        window.contentMinSize = NSMakeSize(900, 540);
+        window.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
         [window center];
         NSView* sidebar = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 190, 780)];
         sidebar.wantsLayer = YES;
         sidebar.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;
         _sidebar = sidebar;
+        sidebar.autoresizingMask = NSViewHeightSizable;
         [window.contentView addSubview:sidebar];
         NSTextField* brand = [self label:@"Ascolto" size:21 bold:YES];
         brand.frame = NSMakeRect(24, 700, 150, 30); [sidebar addSubview:brand];
-        NSArray* categories = @[@"General", @"AI providers", @"Transcription", @"Recording", @"Storage"];
+        brand.autoresizingMask = NSViewMinYMargin;
+        NSArray* categories = @[@"Activity & diagnostics", @"General", @"AI providers", @"Transcription", @"Recording", @"Storage"];
         for (NSUInteger index = 0; index < categories.count; index++) {
             NSButton* button = [self button:categories[index] action:@selector(selectCategory:)];
             button.frame = NSMakeRect(16, 624 - index * 46, 158, 36);
             button.identifier = categories[index];
             button.buttonType = NSButtonTypePushOnPushOff;
+            button.autoresizingMask = NSViewMinYMargin;
             [sidebar addSubview:button];
         }
-        NSTextField* local = [self label:@"Local transcription\nWhistle · on this device" size:11 bold:NO];
+        NSTextField* local = [self label:@"Local transcription\nOn this device" size:11 bold:NO];
         local.textColor = NSColor.secondaryLabelColor;
         local.frame = NSMakeRect(24, 28, 156, 42); [sidebar addSubview:local];
         _page = [[NSView alloc] initWithFrame:NSMakeRect(190, 0, 830, 780)];
         _page.wantsLayer = YES;
-        [window.contentView addSubview:_page];
+        _pageScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(190,0,830,780)];
+        _pageScroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        _pageScroll.hasVerticalScroller = YES; _pageScroll.hasHorizontalScroller = YES;
+        _pageScroll.autohidesScrollers = YES;
+        _canvas = [[AscoltoSettingsCanvas alloc] initWithFrame:NSMakeRect(0,0,830,780)];
+        _pageScroll.documentView = _canvas;
+        [_canvas addSubview:_page];
+        [window.contentView addSubview:_pageScroll];
+        _activity = [[AscoltoActivityViewController alloc] initWithConfig:_options()[@"config"]];
         [self buildPage];
     }
     return self;
 }
+
+- (void)layoutSharedWindow {
+    NSSize available = _pageScroll.contentView.bounds.size;
+    BOOL activity = [_category isEqual:@"Activity & diagnostics"];
+    NSSize pageSize = NSMakeSize(MAX(activity ? 680 : 830, available.width), activity ? MAX(400,available.height) : 780);
+    _canvas.frame = NSMakeRect(0,0,pageSize.width,MAX(pageSize.height,available.height));
+    _page.frame = NSMakeRect(0,0,pageSize.width,pageSize.height);
+    if (activity) _activity.view.frame = _page.bounds;
+}
+
+- (void)windowDidResize:(NSNotification*)notification { (void)notification; [self layoutSharedWindow]; }
+- (void)windowDidEnterFullScreen:(NSNotification*)notification { (void)notification; [self layoutSharedWindow]; }
+- (void)windowDidExitFullScreen:(NSNotification*)notification { (void)notification; [self layoutSharedWindow]; }
 
 - (NSTextField*)label:(NSString*)text size:(CGFloat)size bold:(BOOL)bold {
     NSTextField* label = [NSTextField wrappingLabelWithString:text ?: @""];
@@ -151,6 +196,7 @@
 
 - (void)selectCategory:(NSButton*)sender {
     _category = sender.identifier;
+    _userNavigated = YES;
 
     [self buildPage];
     if (!_busy) [self request:@{@"action": @"section", @"section":_category}];
@@ -163,8 +209,16 @@
     for (NSView* view in _sidebar.subviews) if ([view isKindOfClass:NSButton.class]) {
         NSButton* button = (NSButton*)view; button.state = [button.identifier isEqual:_category];
     }
+    _localRows = nil;
     _notice = nil; _archiveLocation = nil; _monitoring = nil; _saveAudio = nil; _legacy = nil; _legacyTTS = nil;
     _page.layer.backgroundColor = NSColor.controlBackgroundColor.CGColor;
+    [self layoutSharedWindow];
+    if ([_category isEqual:@"Activity & diagnostics"]) {
+        _activity.view.frame = _page.bounds;
+        _activity.view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        [_page addSubview:_activity.view];
+        return;
+    }
     [self addLabel:_category y:704 size:25 bold:YES];
     NSDictionary* values = _options();
     if ([_category isEqual:@"AI providers"]) { [self buildProviders]; return; }
@@ -178,27 +232,28 @@
         [self nativeButton:@"Allow Accessibility access…" selector:@selector(onRequestAccessibility:) y:326 check:NO value:NO];
         [self nativeButton:@"Allow Calendar access…" selector:@selector(onRequestCalendar:) y:280 check:NO value:NO];
     } else if ([_category isEqual:@"Transcription"]) {
-        [self addLabel:@"Whistle provides local live transcription. Optional cloud transcription runs after saving." y:660 size:13 bold:NO];
-        [self addPopup:values[@"languageMenu"] label:@"Transcription language" y:572];
-        [self addPopup:values[@"speakersMenu"] label:@"Speaker recognition" y:470];
-        [self addLabel:@"Custom keywords (comma separated)" y:424 size:12 bold:NO];
-        _keywords = [NSTextField textFieldWithString:_settings[@"keywords"] ?: @""];
-        _keywords.frame=NSMakeRect(30,398,580,28); [_page addSubview:_keywords];
-        NSButton* saveKeywords=[self button:@"Save keywords" action:@selector(saveKeywords:)];saveKeywords.frame=NSMakeRect(620,398,150,28);[_page addSubview:saveKeywords];
-        [self addLabel:@"Optional post-call cloud transcription" y:344 size:17 bold:YES];
-        [self addLabel:@"OpenRouter transcription models only. ChatGPT sign-in supports text recaps. Save audio in Recording to upload the complete MIC/SYS timeline." y:294 size:12 bold:NO];
+        NSSegmentedControl* tabs = [NSSegmentedControl segmentedControlWithLabels:@[@"On device", @"Cloud after calls"] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(selectTranscriptionTab:)];
+        tabs.frame = NSMakeRect(30, 658, 470, 32); tabs.selectedSegment = _transcriptionTab; [_page addSubview:tabs];
+        if (_transcriptionTab == 0) {
+            [self buildLocalTranscription:values];
+            [self refreshNativeValues];
+            return;
+        }
+        [self addLabel:@"Optional cloud work is independent of the model selected on this device." y:600 size:13 bold:NO];
+        [self addLabel:@"Optional post-call cloud transcription" y:544 size:17 bold:YES];
+        [self addLabel:@"OpenRouter transcription models only. ChatGPT sign-in supports text recaps. Save audio in Recording to upload the complete MIC/SYS timeline." y:494 size:12 bold:NO];
         NSDictionary* preference=_settings[@"transcription"];
-        _transcriptionModel=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(30,256,490,30) pullsDown:NO];
-        [_transcriptionModel addItemWithTitle:@"Local Whistle only"];_transcriptionModel.lastItem.representedObject=@"";
+        _transcriptionModel=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(30,456,490,30) pullsDown:NO];
+        [_transcriptionModel addItemWithTitle:@"Local transcription only"];_transcriptionModel.lastItem.representedObject=@"";
         for(NSDictionary* model in _settings[@"profiles"][@"openrouter"][@"transcription_models"]){[_transcriptionModel addItemWithTitle:model[@"name"] ?: model[@"id"]];_transcriptionModel.lastItem.representedObject=model[@"id"];if([model[@"id"] isEqual:preference[@"model"]])[_transcriptionModel selectItem:_transcriptionModel.lastItem];}
         _transcriptionModel.enabled=!_busy;[_page addSubview:_transcriptionModel];
-        NSButton* refresh=[self button:@"Refresh transcription models" action:@selector(refreshTranscription:)];refresh.frame=NSMakeRect(530,256,260,30);refresh.enabled=!_busy;[_page addSubview:refresh];
-        _audioConsent=[NSButton checkboxWithTitle:@"Allow uploading saved MIC and SYS audio to the selected OpenRouter model" target:nil action:nil];_audioConsent.frame=NSMakeRect(30,214,740,30);_audioConsent.state=[preference[@"cloud_audio_opt_in"] boolValue];[_page addSubview:_audioConsent];
-        _autoTranscription=[NSButton checkboxWithTitle:@"Transcribe complete saved audio automatically after each session" target:nil action:nil];_autoTranscription.frame=NSMakeRect(30,178,740,30);_autoTranscription.state=[preference[@"enabled"] boolValue];[_page addSubview:_autoTranscription];
-        NSButton* save=[self button:@"Save cloud preferences" action:@selector(saveTranscription:)];save.frame=NSMakeRect(30,138,240,30);save.enabled=!_busy;[_page addSubview:save];
-        NSButton* plan=[self button:@"Preview latest audio upload" action:@selector(planTranscription:)];plan.frame=NSMakeRect(30,94,300,30);plan.enabled=!_busy;[_page addSubview:plan];
-        NSButton* transcribe=[self button:@"Transcribe latest saved session" action:@selector(runTranscription:)];transcribe.frame=NSMakeRect(350,94,320,30);transcribe.enabled=!_busy;[_page addSubview:transcribe];
-        _notice=[self label:_message ?: @"Cloud transcription is off by default; remote speaker identity stays UNKNOWN without local evidence." size:12 bold:NO];_notice.frame=NSMakeRect(30,28,640,56);[_page addSubview:_notice];
+        NSButton* refresh=[self button:@"Refresh transcription models" action:@selector(refreshTranscription:)];refresh.frame=NSMakeRect(530,456,260,30);refresh.enabled=!_busy;[_page addSubview:refresh];
+        _audioConsent=[NSButton checkboxWithTitle:@"Allow uploading saved MIC and SYS audio to the selected OpenRouter model" target:nil action:nil];_audioConsent.frame=NSMakeRect(30,414,740,30);_audioConsent.state=[preference[@"cloud_audio_opt_in"] boolValue];[_page addSubview:_audioConsent];
+        _autoTranscription=[NSButton checkboxWithTitle:@"Transcribe complete saved audio automatically after each session" target:nil action:nil];_autoTranscription.frame=NSMakeRect(30,378,740,30);_autoTranscription.state=[preference[@"enabled"] boolValue];[_page addSubview:_autoTranscription];
+        NSButton* save=[self button:@"Save cloud preferences" action:@selector(saveTranscription:)];save.frame=NSMakeRect(30,338,240,30);save.enabled=!_busy;[_page addSubview:save];
+        NSButton* plan=[self button:@"Preview latest audio upload" action:@selector(planTranscription:)];plan.frame=NSMakeRect(30,294,300,30);plan.enabled=!_busy;[_page addSubview:plan];
+        NSButton* transcribe=[self button:@"Transcribe latest saved session" action:@selector(runTranscription:)];transcribe.frame=NSMakeRect(350,294,320,30);transcribe.enabled=!_busy;[_page addSubview:transcribe];
+        _notice=[self label:_message ?: @"Cloud transcription is off by default; remote speaker identity stays UNKNOWN without local evidence." size:12 bold:NO];_notice.frame=NSMakeRect(30,228,640,56);[_page addSubview:_notice];
     } else if ([_category isEqual:@"Recording"]) {
         [self addLabel:@"Choose audio sources and optional archives. Changes apply to the next session." y:660 size:13 bold:NO];
         [self addPopup:values[@"micMenu"] label:@"Microphone" y:574];
@@ -222,6 +277,7 @@
         for(NSUInteger i=0;i<kinds.count;i++){NSButton* open=[self button:titles[i] action:@selector(openArchiveItem:)];open.identifier=kinds[i];open.frame=NSMakeRect(30+i*250,370,240,32);open.enabled=!_busy;[_page addSubview:open];}
         NSButton* provisional=[self button:@"Provisional recap so far" action:@selector(runProvisional:)];provisional.frame=NSMakeRect(30,320,300,32);provisional.enabled=!_busy;[_page addSubview:provisional];
         NSButton* final=[self button:@"Generate final recap of latest session" action:@selector(runFinal:)];final.frame=NSMakeRect(30,274,380,32);final.enabled=!_busy;[_page addSubview:final];
+        [self nativeButton:@"View activity…" selector:@selector(onActivity:) y:180 check:NO value:NO];
         NSButton* status=[self button:@"Refresh AI job status" action:@selector(refreshJobStatus:)];status.frame=NSMakeRect(30,224,260,32);status.enabled=!_busy;[_page addSubview:status];
         NSDictionary* job=[_settings[@"jobs"] firstObject];
         NSString* jobText=job ? [NSString stringWithFormat:@"Latest %@: %@ · %@%@",job[@"task"],job[@"status"],job[@"model_label_snapshot"],job[@"error_code"]!=NSNull.null ? [@" · " stringByAppendingString:job[@"error_code"] ?: @""] : @""] : @"No AI jobs yet.";
@@ -230,6 +286,91 @@
     if(_latestAIOutput && [_category isEqual:@"Storage"]){NSButton* open=[self button:@"Open latest AI output…" action:@selector(openAIOutput:)];open.frame=NSMakeRect(320,224,280,32);[_page addSubview:open];}
     if(_busy){NSButton* cancel=[self button:@"Cancel" action:@selector(cancelRequest:)];cancel.frame=NSMakeRect(680,46,90,30);[_page addSubview:cancel];}
     [self refreshNativeValues];
+}
+
+- (ascolto_local_models_t*)localModels {
+    return [_options()[@"localModels"] pointerValue];
+}
+- (void)selectTranscriptionTab:(NSSegmentedControl*)sender {
+    _transcriptionTab = sender.selectedSegment; [self buildPage];
+}
+- (void)buildLocalTranscription:(NSDictionary*)values {
+    _localRows = [[NSView alloc] initWithFrame:NSMakeRect(30, 254, 770, 394)];
+    [_page addSubview:_localRows];
+    [self renderLocalModels];
+    NSTextField* note = [self label:@"Small Italian sample, automatic reference; not certified accuracy. Whisper shares the reference model family." size:11 bold:NO];
+    note.textColor = NSColor.secondaryLabelColor; note.frame = NSMakeRect(30, 210, 600, 36); [_page addSubview:note];
+    NSButton* comparison = [self button:@"View comparison…" action:@selector(showLocalComparison:)]; comparison.frame = NSMakeRect(640, 216, 160, 30); [_page addSubview:comparison];
+    [self addPopup:values[@"languageMenu"] label:@"Transcription language" y:152];
+    _page.subviews[_page.subviews.count-2].frame = NSMakeRect(30,188,350,20);
+    NSPopUpButton* language = _nativePopups.lastObject; language.frame = NSMakeRect(30, 152, 350, 30);
+    [self addPopup:values[@"speakersMenu"] label:@"Speaker recognition" y:88];
+    _page.subviews[_page.subviews.count-2].frame = NSMakeRect(30,124,350,20);
+    NSPopUpButton* speakers = _nativePopups.lastObject; speakers.frame = NSMakeRect(30, 88, 350, 30);
+    NSTextField* title = [self label:@"Custom keywords (comma separated)" size:12 bold:NO]; title.frame=NSMakeRect(410,186,380,28); [_page addSubview:title];
+    _keywords = [NSTextField textFieldWithString:_settings[@"keywords"] ?: @""];
+    _keywords.frame=NSMakeRect(410,152,380,28); [_page addSubview:_keywords];
+    NSButton* save=[self button:@"Save keywords" action:@selector(saveKeywords:)];save.frame=NSMakeRect(410,88,160,30);[_page addSubview:save];
+    _notice=[self label:_message ?: @"Downloads and recognition stay on this device. Choosing a model does not enable cloud audio upload." size:12 bold:NO];_notice.frame=NSMakeRect(30,22,740,48);[_page addSubview:_notice];
+}
+- (void)renderLocalModels {
+    if (!_localRows || _renderingLocal) return;
+    _renderingLocal = YES;
+    for (NSView* view in _localRows.subviews.copy) [view removeFromSuperview];
+    ascolto_local_models_snapshot_t snapshot;
+    ascolto_local_models_snapshot([self localModels], &snapshot);
+    NSData* fixture = _options()[@"localModelsFixture"];
+    if (fixture.length == sizeof(snapshot)) memcpy(&snapshot, fixture.bytes, sizeof(snapshot));
+    _localRevision = snapshot.revision;
+    _lastLocalBusy = [_options()[@"busy"] boolValue];
+    NSString* selected=@(snapshot.selected);NSString* active=@(snapshot.active);
+    for(int i=0;i<4;i++){if(!strcmp(snapshot.models[i].id,snapshot.selected))selected=@(snapshot.models[i].name);if(!strcmp(snapshot.models[i].id,snapshot.active))active=@(snapshot.models[i].name);}
+    NSString* status = snapshot.active[0] ? [NSString stringWithFormat:@"Recording with %@ · Next session: %@", active, selected] : [NSString stringWithFormat:@"Next session: %@ · %.2f GB available", selected, snapshot.available_bytes / 1e9];
+    if (snapshot.error[0]) status = @(snapshot.error);
+    NSTextField* header=[self label:status size:12 bold:NO]; header.frame=NSMakeRect(0,356,765,38);header.textColor=snapshot.error[0]?NSColor.systemRedColor:NSColor.secondaryLabelColor;[_localRows addSubview:header];
+    for (int i=0;i<ASCOLTO_LOCAL_MODEL_COUNT;i++) {
+        ascolto_model_snapshot_t* model=&snapshot.models[i];
+        if (!model->id[0]) continue;
+        CGFloat y=266-i*88;
+        NSTextField* name=[self label:@(model->name) size:14 bold:YES];name.frame=NSMakeRect(0,y+58,580,24);[_localRows addSubview:name];
+        NSTextField* description=[self label:@(model->description) size:12 bold:NO];description.frame=NSMakeRect(0,y+30,590,30);description.textColor=NSColor.secondaryLabelColor;[_localRows addSubview:description];
+        NSString* detail;
+        if (model->state==ASCOLTO_MODEL_DOWNLOADING) detail=[NSString stringWithFormat:@"Downloading %.1f / %.1f MB",model->transferred/1e6,model->bytes/1e6];
+        else if (model->state==ASCOLTO_MODEL_VERIFYING) detail=@"Verifying download…";
+        else if (model->state==ASCOLTO_MODEL_CHECKING) detail=@"Checking model files…";
+        else if (model->message[0]) detail=@(model->message);
+        else detail=model->state==ASCOLTO_MODEL_READY?@"Downloaded · verified":model->state==ASCOLTO_MODEL_MISSING?@"Not downloaded":@(model->hint);
+        if(model->bytes && (model->state==ASCOLTO_MODEL_MISSING || model->state==ASCOLTO_MODEL_READY)) detail=[NSString stringWithFormat:@"%@ · %@ · %.1f MB download",detail,@(model->hint),model->bytes/1e6];
+        if(i==2 && model->selected)detail=[detail stringByAppendingString:@" · Automatic language; keyword prompts unavailable"];
+        if(model->selected)detail=[@"Selected · " stringByAppendingString:detail];
+        NSTextField* state=[self label:detail size:11 bold:NO];state.frame=NSMakeRect(0,y+5,590,27);[_localRows addSubview:state];
+        if(model->state==ASCOLTO_MODEL_DOWNLOADING){NSProgressIndicator* progress=[[NSProgressIndicator alloc] initWithFrame:NSMakeRect(0,y+1,580,5)];progress.indeterminate=NO;progress.maxValue=model->bytes;progress.doubleValue=model->transferred;[_localRows addSubview:progress];}
+        NSString* action;NSString* title;
+        if(model->state==ASCOLTO_MODEL_INCLUDED || model->state==ASCOLTO_MODEL_READY){action=@"use";title=model->selected?@"Selected":snapshot.active[0]?@"Use next session":@"Use model";}
+        else if(model->state==ASCOLTO_MODEL_DOWNLOADING || model->state==ASCOLTO_MODEL_VERIFYING){action=@"cancel";title=@"Cancel";}
+        else {action=@"download";title=model->state==ASCOLTO_MODEL_ERROR?@"Retry download":@"Download";}
+        NSButton* button=[self button:title action:@selector(localModelAction:)];button.identifier=[NSString stringWithFormat:@"%@:%s",action,model->id];button.frame=NSMakeRect(610,y+46,155,30);button.enabled=![_options()[@"busy"] boolValue] && (!model->selected || ![action isEqual:@"use"]) && model->state!=ASCOLTO_MODEL_CHECKING && model->state!=ASCOLTO_MODEL_UNSUPPORTED;
+        if([action isEqual:@"cancel"])button.enabled=YES;
+        button.accessibilityLabel=[NSString stringWithFormat:@"%@: %@",title,@(model->name)];
+        [_localRows addSubview:button];
+        if(i && !model->selected && !model->active && (model->state==ASCOLTO_MODEL_READY || model->state==ASCOLTO_MODEL_ERROR)){NSButton* remove=[self button:@"Remove…" action:@selector(localModelAction:)];remove.identifier=[@"remove:" stringByAppendingString:@(model->id)];remove.accessibilityLabel=[NSString stringWithFormat:@"Remove %@",@(model->name)];remove.frame=NSMakeRect(610,y+10,155,28);remove.enabled=![_options()[@"busy"] boolValue];[_localRows addSubview:remove];}
+    }
+    _renderingLocal = NO;
+}
+- (void)localModelAction:(NSButton*)sender {
+    NSArray* parts=[sender.identifier componentsSeparatedByString:@":"];if(parts.count!=2)return;
+    NSString* action=parts[0];NSString* model=parts[1];
+    ascolto_local_models_t* manager=[self localModels];if(!manager)return;
+    if([action isEqual:@"cancel"]){ascolto_local_models_cancel(manager,model.UTF8String);return;}
+    void (^perform)(NSString*, NSString*) = _options()[@"localModelAction"];
+    if (perform) perform(action, model);
+
+}
+- (void)showLocalComparison:(id)sender {
+    (void)sender;
+    NSAlert* alert=[[NSAlert alloc] init];alert.messageText=@"Local model comparison";
+    alert.informativeText=@"These descriptions summarize a small Italian call sample against an automatic cloud reference, not human ground truth or certified accuracy. Whisper is in the same model family as the reference. Processing delay, recognition agreement and memory use are different measurements. Whistle is the included lightweight baseline; Whisper had the closest reference agreement, Parakeet had very low processing delay, and Qwen used more memory. Language and custom keywords depend on the selected engine; Parakeet detects language automatically.";
+    [alert beginSheetModalForWindow:self.window completionHandler:nil];
 }
 
 - (void)buildProviders {
@@ -320,7 +461,7 @@
     _automatic = [NSButton checkboxWithTitle:@"Generate a recap after each session" target:self action:@selector(updatePreferences:)];
     _automatic.frame = NSMakeRect(30, 110, 600, 30); _automatic.state = [_settings[@"automatic_recaps"] boolValue];
     _automatic.enabled = selected.length && !_busy; [_page addSubview:_automatic];
-    NSString* help = [_settings[@"runtime_ready"] boolValue] ? @"Only transcript text is sent. Local Whistle transcription and audio archives are unchanged." : @"AI dependencies are missing. Run make recap-deps and rebuild the app bundle.";
+    NSString* help = [_settings[@"runtime_ready"] boolValue] ? @"Only transcript text is sent. On-device transcription and audio archives are unchanged." : @"AI dependencies are missing. Run make recap-deps and rebuild the app bundle.";
     _notice = [self label:_message ?: _settings[@"secure_store_message"] ?: help size:12 bold:NO];
     _notice.textColor = NSColor.secondaryLabelColor; _notice.frame = NSMakeRect(30, 40, 640, 62); [_page addSubview:_notice];
     NSButton* cancel = [self button:@"Cancel" action:@selector(cancelRequest:)]; cancel.frame = NSMakeRect(680, 48, 90, 30); cancel.hidden = !_busy; [_page addSubview:cancel];
@@ -414,7 +555,7 @@
             strongSelf.worker = nil; strongSelf.busy = NO;
             if ([result[@"ok"] boolValue]) {
                 NSString* openPath=result[@"result"][@"open_path"];if([openPath isKindOfClass:NSString.class])[[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:openPath]];
-                if(!strongSelf.settings){NSString* saved=result[@"settings"][@"settings_section"];if([@[@"General",@"AI providers",@"Transcription",@"Recording",@"Storage"] containsObject:saved])strongSelf.category=saved;}
+                if(!strongSelf.settings && !strongSelf.userNavigated){NSString* saved=result[@"settings"][@"settings_section"];if([@[@"Activity & diagnostics",@"General",@"AI providers",@"Transcription",@"Recording",@"Storage"] containsObject:saved])strongSelf.category=saved;}
                 strongSelf.settings = result[@"settings"];
                 if([result[@"result"][@"session_dir"] isKindOfClass:NSString.class])strongSelf.latestAIOutput=result[@"result"][@"session_dir"];
                 if ([request[@"action"] isEqual:@"use"] || ([request[@"action"] isEqual:@"preferences"] && [request[@"automatic_recaps"] boolValue]))
@@ -446,20 +587,49 @@
 
 - (void)performAITask:(NSString*)action {
     _closing=NO; _category=@"Storage";
-    [self.window makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES];
+    [self presentMainWindow];
     if(_busy){_pendingTask=action;[self buildPage];}else [self request:@{@"action":action}];
 }
 - (void)cancelRequest:(id)sender { (void)sender; [self cancelWorker]; _message = @"Cancelled. Your existing connection has been kept."; [self buildPage]; }
 - (void)cancelWorker { _pendingTask=nil; NSTask* task = _worker; _worker = nil; _busy = NO; if (task.running) [task terminate]; }
-- (void)windowWillClose:(NSNotification*)notification { (void)notification; _closing = YES; [self cancelWorker]; _secureKey.stringValue = @""; _plainKey.stringValue = @""; }
+- (void)windowWillClose:(NSNotification*)notification {
+    (void)notification; _closing = YES; [self cancelWorker];
+    _secureKey.stringValue = @""; _plainKey.stringValue = @"";
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+}
+- (void)presentMainWindow {
+    // Remain a regular app while the window is open, including when inactive,
+    // hidden or minimized, so the Dock and Command-Tab can restore it.
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    ascolto_apply_application_icon();
+    if (self.window.miniaturized) [self.window deminiaturize:nil];
+    [self.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+- (void)windowDidBecomeKey:(NSNotification*)notification {
+    (void)notification;
+    ascolto_apply_application_icon();
+}
 - (void)showSettings {
-    _closing = NO; [self buildPage]; [self.window makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES];
+    _closing = NO; [self buildPage]; [self presentMainWindow];
     if (!_settings && !_busy) [self request:@{@"action": @"status"}];
 }
+- (void)showActivity {
+    _closing=NO; _userNavigated=YES; _category=@"Activity & diagnostics";
+    [self buildPage];
+    [self presentMainWindow];
+    [_activity showActivity];
+}
+- (NSInteger)attentionCount { return _activity.attentionCount; }
+- (void)stopActivityRefresh { [_activity stopRefreshing]; }
 - (void)menuWillOpen:(NSMenu*)menu { (void)menu; _nativeMenuTracking = YES; }
 - (void)menuDidClose:(NSMenu*)menu { (void)menu; _nativeMenuTracking = NO; }
 - (void)refreshNativeValues {
     NSDictionary* values = _options();
+    if (_localRows) {
+        ascolto_local_models_snapshot_t snapshot; ascolto_local_models_snapshot([self localModels], &snapshot);
+        if (snapshot.revision != _localRevision || _lastLocalBusy != [values[@"busy"] boolValue]) [self renderLocalModels];
+    }
     _archiveLocation.stringValue = values[@"output"] ?: @"";
     [self.window.effectiveAppearance performAsCurrentDrawingAppearance:^{
         self.sidebar.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;

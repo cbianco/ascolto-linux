@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "ascolto/storage.h"
+#include "ascolto/local_stt.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -277,6 +278,9 @@ typedef struct {
     ascolto_config_t config;
     int settings_error;
     ascolto_whistle_t* whistle;
+    ascolto_local_models_t* local_models;
+    ascolto_local_stt_t local_stt;
+    bool transcription_error;
     ascolto_diarizer_t diarizer;
     ascolto_online_vad_t vad_mic;
     ascolto_online_vad_t vad_sys;

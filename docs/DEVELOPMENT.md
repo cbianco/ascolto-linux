@@ -15,3 +15,41 @@ The commands below describe macOS verification and tooling.
 For shared persistence and AI checks, see [DATABASE.md](DATABASE.md) and
 [AI_WORKFLOWS.md](AI_WORKFLOWS.md). Synthetic tests do not establish real-call
 transcription or speaker accuracy.
+
+## Optional native speech engines
+
+Default native builds prepare all three in-process adapters through
+`make local-stt-deps`; this builds pinned C/C++ sources and never downloads optional weights.
+The build requires Git, CMake and a C/C++ compiler. Linux also requires libcurl,
+OpenSSL and OpenBLAS development packages (`libcurl4-openssl-dev libssl-dev
+libopenblas-dev` on Debian/Ubuntu). macOS uses system libcurl, CommonCrypto,
+Accelerate and Metal. The app bundle copies the adapters and license notices; it
+has no Homebrew runtime dependency. `WITH_LOCAL_STT=0` builds the baseline without
+preparing optional runtimes; missing adapters appear unavailable without changing
+the saved model choice.
+
+`make test-local-stt` checks synthetic download, cancellation, integrity, explicit
+selection, active-model removal protection, missing-model errors and cloud
+preference independence without network or speech weights. `make test-settings`
+renders catalog/download/retry/recording/unsupported/cloud states in light/dark.
+See [LOCAL_STT.md](LOCAL_STT.md) for opt-in native runtime and production-pipeline
+verification with preinstalled weights and synthetic speech.
+
+## Activity diagnostics checks
+
+The macOS bundle includes the approved listening-ear application icon. Rebuild
+its standard and Retina representations with `sh scripts/build_app_icon.sh`
+after updating `assets/ascolto-app-icon.png` (1024px, transparent corners).
+The editable vector source is `docs/design/ascolto-app-icon.svg` and the
+corresponding FigCraft identity board. Packaging adds `CFBundleIconFile` and
+copies the ICNS resource before signing.
+`make test-app-icon` renders the production icon loader against the bundle and
+checks the approved green artwork, transparent corners and native-sized inset;
+this rejects both a generic application placeholder and an oversized raw tile.
+
+`make test-diagnostics` runs the metadata snapshot, guarded retry and cooperative
+cancellation fixture tests without provider calls. `make test-activity` renders
+and verifies the native AppKit window in light/dark appearance. GTK diagnostics
+are covered by `make test-tray` under Xvfb, including filtering and the copy
+preview; an SVG loader is required by the existing icon tests. See
+[Activity and diagnostics](design/activity-diagnostics.md).

@@ -1,0 +1,3 @@
+263f178fe752c90a2ae58f037a95ed092db8b14768b0978b8c48f66979c8345d  build/stt-bench/models/voxtral-mini-4b-realtime/consolidated.safetensors
+2ace010ebf7f0b62c60747d91c6d140e3c7238632d3e9c63d60a2bd2065ea301  build/stt-bench/models/voxtral-mini-4b-realtime/params.json
+8434af1d39eba99f0ef46cf1450bf1a63fa941a26933a1ef5dbbf4adf0d00e44  build/stt-bench/models/voxtral-mini-4b-realtime/tekken.json

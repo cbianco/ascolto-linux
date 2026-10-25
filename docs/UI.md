@@ -47,8 +47,9 @@ native GTK adapter, not a complete live GNOME Shell session.
 ## Settings and AI providers
 
 The menu bar and GNOME panel now keep session actions, monitoring shortcuts,
-Settings, archive access, and Quit. Configuration lives in a native window with
-General, AI providers, Transcription, Recording, and Storage. The first category
+Settings, archive access, and Quit. One native app window contains Activity &
+diagnostics, General, AI providers, Transcription, Recording, and Storage. Menu
+shortcuts select a section of that same window. The initial settings category
 is AI providers; reopening the window retains the current category. macOS also
 remembers the category across launches. Existing language, speaker, keywords,
 source-device, audio archive, and legacy cloud controls remain available.
@@ -133,12 +134,19 @@ assets in `assets/chatgpt-logo*.svg` come from the
 
 ## Integrated task controls and storage feedback
 
+The native Transcription category now has On device and Cloud after calls tabs.
+Whistle remains the included default; Whisper large-v3-turbo Q5, Parakeet TDT v3
+and Qwen3-ASR 1.7B are optional verified downloads with explicit activation.
+The editable design document records this implemented control hierarchy. See
+[Local transcription model design](design/local-transcription-models.md) for
+download states, concise evidence-based copy and next-session selection.
+
 Transcription presents a dedicated OpenRouter transcription catalog, an explicit
 saved MIC/SYS audio upload checkbox, and an independent post-call automatic
 switch. Saving a model without consent never authorizes audio upload. Preview
 latest audio upload reports complete-channel duration and request count locally.
 The execution plan uses a calculated limit up to 4,096 requests and fails instead
-of truncating a longer archive. Whistle remains the live engine for every choice.
+of truncating a longer archive. The on-device engine choice stays independent of all cloud preferences.
 
 Storage exposes provisional recap, final recap and refreshable job status. Manual
 menu recap shortcuts open this same native workflow surface so failures and result
@@ -160,3 +168,27 @@ directory. Restoring these paths does not restore live recording counters. The
 AppKit `make test-history` and GTK `make test-tray` regressions verify actual menu
 actions after restart. GTK preview tests assert the official ChatGPT SVG exists
 and decodes successfully, and select built-in Adwaita light/dark variants.
+
+## Activity and diagnostics
+
+The **Activity & diagnostics** section opens inside the shared app window from
+the main menu or Storage's **View activity…** action. Its call list includes empty sessions and a
+Needs attention filter. Overview keeps saved artifacts, outcome and recovery
+first; Technical details and Attempts expose provider/model snapshots, recorded
+events and attempt history. A newer failure does not hide a previous valid recap.
+Recap attempts also expose per-chunk request and validation stages, response
+durations and content-free validation locations and causes. The copy preview
+includes the same bounded progress history; historical attempts without it
+continue to show their original state transitions.
+Requests, polling and cancellation run independently in the background. Safe
+metadata is previewed inline before copying, without captured content or credentials.
+Navigation retains the selected call, filter and active requests. Neither the
+activity view nor its copy preview creates an additional app window.
+The macOS window supports native resizing, zoom and full screen. Its sidebar
+stays anchored while Activity uses the available space; fixed-width settings
+forms remain readable and scroll in compact windows instead of clipping.
+While the macOS window is open, Ascolto appears in the Dock and Command-Tab,
+including after switching apps or minimizing. Dock reopen restores that same
+window. Closing it returns Ascolto to menu-bar-only operation.
+See [the implemented design](design/activity-diagnostics.md) for state semantics,
+privacy boundaries, cancellation limits and verification.

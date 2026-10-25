@@ -20,7 +20,14 @@ use copied snapshots; capture producers only enqueue PCM.
 Config startup runs standard-library bootstrap before the UI/control server.
 A `bootstrap_state` marker distinguishes adoption from defaults created by an AI
 worker. Later native saves update SQLite, leaving imported JSON/INI/keyword files
-unchanged. The small `native_settings` table retains legacy values and the explicit
+unchanged. The `native_settings.local_transcription_model` key stores the next-session local
+engine ID (default `whistle` when absent). It is independent of cloud transcription
+preferences; missing/invalid artifacts never rewrite the selection. Model files
+live beside the configuration under `local-models/`, not in SQLite. Session and
+utterance metadata retain the actual `local_model`; unsupported token timing is
+null and unavailable word timing/probabilities are absent.
+
+The small `native_settings` table retains legacy values and the explicit
 OpenCode Go acknowledgment. `ascolto_db_setting_get/set()` allowlist app columns;
 `oauth_host_id` is generated once and read-only. Native devices retain their
 platform identifiers. Config adapters use explicit conversions and key/value
@@ -114,6 +121,12 @@ notes are preserved on explicit retry. States are
 `queued|validating|running|completed|failed|cancelled`; SQL triggers append
 content-free `job_events`. Store only short sanitized error codes. Commit ready
 artifacts and terminal state together before reporting success.
+Fine-grained progress is stored separately in owner-only sibling
+`job-diagnostics/job-<id>.json` files. SQLite remains authoritative for job state;
+progress files never override a terminal state or contain captured text, quotes,
+credentials or raw provider responses. Missing historical progress is unavailable.
+Completed artifacts and database state remain successful if the final diagnostic
+write fails after their commit. See [AI_WORKFLOWS.md](AI_WORKFLOWS.md).
 
 Startup/status reconciliation uses a nonblocking session/task flock to prove a
 worker is gone before failing an interrupted attempt. It never retries inference

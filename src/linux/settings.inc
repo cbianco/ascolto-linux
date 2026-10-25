@@ -26,6 +26,10 @@ SF(void*, gtk_button_new_with_label, (const char*));
 SF(void*, gtk_check_button_new_with_label, (const char*));
 SF(void, gtk_toggle_button_set_active, (void*, gboolean));
 SF(gboolean, gtk_toggle_button_get_active, (void*));
+SF(void*, gtk_widget_get_accessible, (void*));
+SF(void, atk_object_set_name, (void*, const char*));
+SF(void*, gtk_progress_bar_new, (void));
+SF(void, gtk_progress_bar_set_fraction, (void*, double));
 SF(void*, gtk_entry_new, (void));
 SF(void, gtk_entry_set_text, (void*, const char*));
 SF(const char*, gtk_entry_get_text, (void*));
@@ -117,7 +121,7 @@ static void settings_worker_done(GObject *object, GAsyncResult *result, gpointer
         const char *open_path=setting_string(task_result,"open_path","");
         if(*open_path)launch_path_nonblocking(open_path,setting_bool(task_result,"is_directory"));
         JsonObject *state = setting_object(response, "settings");
-        if(!p->ai_state){const char *saved=setting_string(state,"settings_section","");const char *sections[]={"General","AI providers","Transcription","Recording","Storage"};for(int i=0;i<5;i++)if(!strcmp(saved,sections[i]))p->settings_category=i;}
+        if(!p->ai_state && p->settings_category != 5){const char *saved=setting_string(state,"settings_section","");const char *sections[]={"General","AI providers","Transcription","Recording","Storage"};for(int i=0;i<5;i++)if(!strcmp(saved,sections[i]))p->settings_category=i;}
         if (p->ai_state) json_object_unref(p->ai_state);
         p->ai_state = state ? json_object_ref(state) : NULL;
         const char *action = g_object_get_data(object, "ascolto-ai-action");
@@ -293,20 +297,75 @@ static void settings_category(void *widget, gpointer data) {
     ascolto_tray_ui_t *ui = data; gtk_tray_priv_t *p = ui->gtk_impl;
     p->settings_category = GPOINTER_TO_INT(g_object_get_data(widget, "category"));
     settings_build(ui);
-    if (!p->ai_worker) {
+    if (!p->ai_worker && p->settings_category < 5) {
         const char *sections[]={"General","AI providers","Transcription","Recording","Storage"};
         JsonObject *request=settings_command("section",NULL);json_object_set_string_member(request,"section",sections[p->settings_category]);settings_request(ui,request);
     }
 }
+static void settings_local_tab(void *widget, gpointer data) {
+    ascolto_tray_ui_t *ui=data; gtk_tray_priv_t *p=ui->gtk_impl;
+    p->settings_cloud_tab=GPOINTER_TO_INT(g_object_get_data(G_OBJECT(widget), "cloud-tab")); settings_build(ui);
+}
+static void settings_local_action(void *widget, gpointer data) {
+    ascolto_tray_ui_t *ui=data;
+    const char *id=g_object_get_data(G_OBJECT(widget), "local-id");
+    int action=GPOINTER_TO_INT(g_object_get_data(G_OBJECT(widget), "local-action"));
+    if (action==-1) ascolto_local_models_cancel(ui->core->local_models,id);
+    else queue_menu_action(ui,(menu_action_t)action,id);
+}
+static void settings_comparison(void *widget, gpointer data) {
+    (void)widget; ascolto_tray_ui_t *ui=data; gtk_tray_priv_t *p=ui->gtk_impl;
+    g_free(p->ai_message);p->ai_message=g_strdup("Small Italian sample against an automatic cloud reference, not human ground truth or certified accuracy. Whisper shares the reference model family. Delay, recognition agreement and memory are separate measurements. Parakeet detects language automatically; language and keyword support depend on the engine."); settings_build(ui);
+}
+static void settings_render_local_models(ascolto_tray_ui_t *ui) {
+    gtk_tray_priv_t *p=ui->gtk_impl;if(!p->local_models_box)return;
+    GList *children=s_gtk_container_get_children(p->local_models_box);
+    for(GList *it=children;it;it=it->next)p->gtk_widget_destroy(it->data);g_list_free(children);
+    ascolto_local_models_snapshot_t snapshot;ascolto_local_models_snapshot(ui->core->local_models,&snapshot);p->local_revision=snapshot.revision;p->local_action_pending=!!g_atomic_int_get(&p->action_pending);
+    const char *selected=snapshot.selected,*active=snapshot.active;
+    for(int i=0;i<4;i++){if(!strcmp(snapshot.models[i].id,snapshot.selected))selected=snapshot.models[i].name;if(!strcmp(snapshot.models[i].id,snapshot.active))active=snapshot.models[i].name;}
+    gchar *status=snapshot.active[0]?g_strdup_printf("Recording with %s · Next session: %s",active,selected):g_strdup_printf("Next session: %s · %.2f GB available",selected,snapshot.available_bytes/1e9);
+    settings_label(p,p->local_models_box,snapshot.error[0]?snapshot.error:status);g_free(status);
+    for(int i=0;i<4;i++){
+        ascolto_model_snapshot_t *model=&snapshot.models[i];if(!model->id[0])continue;
+        void *row=s_gtk_box_new(0,12);s_gtk_box_pack_start(p->local_models_box,row,FALSE,FALSE,6);
+        void *copy=s_gtk_box_new(1,2);s_gtk_box_pack_start(row,copy,TRUE,TRUE,0);
+        void *title=settings_label(p,copy,model->name);gchar *escaped=g_markup_escape_text(model->name,-1);gchar *bold=g_strdup_printf("<b>%s</b>",escaped);s_gtk_label_set_markup(title,bold);g_free(escaped);g_free(bold);
+        settings_label(p,copy,model->description);
+        gchar *detail;
+        if(model->state==ASCOLTO_MODEL_DOWNLOADING)detail=g_strdup_printf("Downloading %.1f / %.1f MB",model->transferred/1e6,model->bytes/1e6);
+        else if(model->state==ASCOLTO_MODEL_CHECKING)detail=g_strdup("Checking model files…");
+        else if(model->state==ASCOLTO_MODEL_VERIFYING)detail=g_strdup("Verifying download…");
+        else if(i==0)detail=g_strdup_printf("%sDefault · included · 17 MB",model->selected?"Selected · ":"");
+        else detail=g_strdup_printf("%s%s · %s · %.1f MB download",model->selected?"Selected · ":"",model->message,model->hint,model->bytes/1e6);
+        if(i==2&&model->selected){gchar *extended=g_strconcat(detail," · Automatic language; keyword prompts unavailable",NULL);g_free(detail);detail=extended;}
+        settings_label(p,copy,detail);g_free(detail);
+        if(model->state==ASCOLTO_MODEL_DOWNLOADING){void *progress=s_gtk_progress_bar_new();s_gtk_progress_bar_set_fraction(progress,model->bytes?(double)model->transferred/model->bytes:0);s_gtk_box_pack_start(copy,progress,FALSE,FALSE,2);}
+        void *actions=s_gtk_box_new(1,2);s_gtk_box_pack_start(row,actions,FALSE,FALSE,0);
+        int action;const char *label;
+        if(model->state==ASCOLTO_MODEL_INCLUDED||model->state==ASCOLTO_MODEL_READY){action=MENU_LOCAL_USE;label=model->selected?"Selected":snapshot.active[0]?"Use next session":"Use model";}
+        else if(model->state==ASCOLTO_MODEL_DOWNLOADING||model->state==ASCOLTO_MODEL_VERIFYING){action=-1;label="Cancel";}
+        else {action=MENU_LOCAL_DOWNLOAD;label=model->state==ASCOLTO_MODEL_ERROR?"Retry download":"Download";}
+        void *button=settings_button(ui,actions,label,G_CALLBACK(settings_local_action));gchar *accessible=g_strdup_printf("%s: %s",label,model->name);s_atk_object_set_name(s_gtk_widget_get_accessible(button),accessible);g_free(accessible);g_object_set_data_full(button,"local-id",g_strdup(model->id),g_free);g_object_set_data(button,"local-action",GINT_TO_POINTER(action));
+        p->gtk_widget_set_sensitive(button,action==-1||((!model->selected||action!=MENU_LOCAL_USE)&&model->state!=ASCOLTO_MODEL_CHECKING&&model->state!=ASCOLTO_MODEL_UNSUPPORTED&&!g_atomic_int_get(&p->action_pending)));
+        if(i&&!model->selected&&!model->active&&(model->state==ASCOLTO_MODEL_READY||model->state==ASCOLTO_MODEL_ERROR)){button=settings_button(ui,actions,"Remove…",G_CALLBACK(settings_local_action));g_object_set_data_full(button,"local-id",g_strdup(model->id),g_free);g_object_set_data(button,"local-action",GINT_TO_POINTER(MENU_LOCAL_REMOVE));}
+    }
+    p->gtk_widget_show_all(p->local_models_box);
+}
 static void settings_build(ascolto_tray_ui_t *ui) {
     gtk_tray_priv_t *p = ui->gtk_impl;
     if (!p->settings_page) return;
+    if (p->settings_category == 5) { diagnostics_show_section(ui); return; }
+    p->diagnostics_visible = false;
+    if (p->diagnostics_root) s_gtk_widget_hide(p->diagnostics_root);
+    p->gtk_widget_show_all(p->settings_scroll);
     p->settings_building = true;
     GList *children = s_gtk_container_get_children(p->settings_page);
     for (GList *it = children; it; it = it->next) p->gtk_widget_destroy(it->data);
     g_list_free(children);
     p->settings_auto = p->settings_save = p->settings_legacy = p->settings_tts = NULL;
     p->settings_archive_label = NULL;
+    p->local_models_box = NULL;
     ascolto_tray_snapshot_t snap; ascolto_tray_get_snapshot(ui, &snap);
     if(snap.storage_error)settings_label(p,p->settings_page,"Transcript storage failed. Local artifacts are retained; review the database and storage permissions.");
     const char *categories[] = {"General", "AI providers", "Transcription", "Recording", "Storage"};
@@ -320,7 +379,13 @@ static void settings_build(ascolto_tray_ui_t *ui) {
         settings_button(ui, p->settings_page, "Open system audio settings…", G_CALLBACK(settings_audio_permissions));
         settings_label(p, p->settings_page, "Microphone and call audio are captured through PipeWire. Use desktop sound settings to select and manage device access.");
     } else if (p->settings_category == 2) {
-        settings_label(p, p->settings_page, "Whistle transcribes locally on this device.");
+        void *tabs=s_gtk_box_new(0,8);s_gtk_box_pack_start(p->settings_page,tabs,FALSE,FALSE,2);
+        void *tab=settings_button(ui,tabs,"On device",G_CALLBACK(settings_local_tab));g_object_set_data(tab,"cloud-tab",GINT_TO_POINTER(0));
+        tab=settings_button(ui,tabs,"Cloud after calls",G_CALLBACK(settings_local_tab));g_object_set_data(tab,"cloud-tab",GINT_TO_POINTER(1));
+        if(!p->settings_cloud_tab){
+        p->local_models_box=s_gtk_box_new(1,4);s_gtk_box_pack_start(p->settings_page,p->local_models_box,FALSE,FALSE,2);settings_render_local_models(ui);
+        settings_label(p,p->settings_page,"Small Italian sample, automatic reference; not certified accuracy. Whisper shares the reference model family.");
+        settings_button(ui,p->settings_page,"View comparison…",G_CALLBACK(settings_comparison));
         void *combo = settings_combo(p, p->settings_page, "Transcription language");
         const char *codes[] = {"auto", "it", "en", "de", "fr", "es", "nl", "pl"};
         const char *labels[] = {"Detect automatically", "Italian", "English", "German", "French", "Spanish", "Dutch", "Polish"};
@@ -335,10 +400,12 @@ static void settings_build(ascolto_tray_ui_t *ui) {
         s_gtk_entry_set_text(p->settings_keywords, snap.settings_keywords);
         s_gtk_box_pack_start(p->settings_page, p->settings_keywords, FALSE, FALSE, 2);
         settings_button(ui, p->settings_page, "Save keywords", G_CALLBACK(settings_keywords));
+        settings_label(p,p->settings_page,"Downloads and recognition stay on this device. Model choices do not enable cloud audio upload.");
+        }else{
         settings_label(p,p->settings_page,"Optional post-call cloud transcription · OpenRouter transcription");
-        settings_label(p,p->settings_page,"Whistle remains the live engine. ChatGPT sign-in supports text recaps only. Enable Save audio in Recording to upload the complete MIC/SYS timeline.");
+        settings_label(p,p->settings_page,"The on-device model stays independent. ChatGPT sign-in supports text recaps only. Enable Save audio in Recording to upload the complete MIC/SYS timeline.");
         JsonObject *preference=setting_object(p->ai_state,"transcription");
-        p->stt_model=settings_combo(p,p->settings_page,"Post-call transcription model");s_gtk_combo_box_text_append(p->stt_model,"","Local Whistle only");
+        p->stt_model=settings_combo(p,p->settings_page,"Post-call transcription model");s_gtk_combo_box_text_append(p->stt_model,"","Local transcription only");
         JsonArray *models=setting_array(setting_object(setting_object(p->ai_state,"profiles"),"openrouter"),"transcription_models");
         for(guint index=0;models&&index<json_array_get_length(models);index++){JsonObject *model=json_array_get_object_element(models,index);s_gtk_combo_box_text_append(p->stt_model,setting_string(model,"id",""),setting_string(model,"name",setting_string(model,"id","")));}
         s_gtk_combo_box_set_active_id(p->stt_model,setting_string(preference,"model",""));
@@ -348,6 +415,7 @@ static void settings_build(ascolto_tray_ui_t *ui) {
         settings_button(ui,p->settings_page,"Save cloud preferences",G_CALLBACK(settings_stt_save));
         settings_task_button(ui,p->settings_page,"Preview latest audio upload","plan_transcription");
         settings_task_button(ui,p->settings_page,"Transcribe latest saved session","transcription");
+        }
     } else if (p->settings_category == 3) {
         settings_label(p, p->settings_page, "Choose audio sources. Changes apply to the next session.");
         for (int channel=0; channel<2; channel++) {
@@ -370,6 +438,7 @@ static void settings_build(ascolto_tray_ui_t *ui) {
         void *location = settings_label(p, p->settings_page, snap.archive_directory); p->settings_archive_label=location; s_gtk_label_set_selectable(location, TRUE);
         settings_button(ui, p->settings_page, "Open archive folder…", G_CALLBACK(on_menu_open_folder));
         settings_button(ui,p->settings_page,"Change folder…",G_CALLBACK(settings_change_folder));
+        settings_button(ui, p->settings_page, "View activity…", G_CALLBACK(on_menu_diagnostics));
         settings_label(p,p->settings_page,"Each call keeps transcript.md and recap.md together, with Audio, Data and Recap-history folders. Folder changes apply to new calls; existing calls keep their paths.");
         const char *kinds[]={"call_directory","transcript","recap"};const char *titles[]={"Open latest call","Open transcript","Open recap"};
         for(int i=0;i<3;i++){void *button=settings_button(ui,p->settings_page,titles[i],G_CALLBACK(settings_open_item));g_object_set_data(G_OBJECT(button),"archive-kind",(gpointer)kinds[i]);p->gtk_widget_set_sensitive(button,p->ai_worker==NULL);}
@@ -448,7 +517,7 @@ static void settings_build(ascolto_tray_ui_t *ui) {
         s_gtk_box_pack_start(p->settings_page, p->ai_auto, FALSE, FALSE, 2); p->gtk_widget_set_sensitive(p->ai_auto, *selected && !busy);
         g_signal_connect_data(p->ai_auto, "toggled", G_CALLBACK(settings_preferences), ui, NULL, 0);
         g_signal_connect_data(p->ai_language, "changed", G_CALLBACK(settings_preferences), ui, NULL, 0);
-        settings_label(p, p->settings_page, p->ai_message && *p->ai_message ? p->ai_message : setting_string(p->ai_state, "secure_store_message", "Whistle transcription stays local. No audio is sent to this provider."));
+        settings_label(p, p->settings_page, p->ai_message && *p->ai_message ? p->ai_message : setting_string(p->ai_state, "secure_store_message", "On-device transcription stays local. No audio is sent to this provider."));
         if (setting_bool(setting_object(setting_object(p->ai_state, "profiles"), "openai"), "welcome_pending")) settings_button(ui, p->settings_page, "Got it", G_CALLBACK(settings_acknowledge));
         if (busy) settings_button(ui, p->settings_page, "Cancel", G_CALLBACK(settings_cancel_clicked));
     }
@@ -459,12 +528,12 @@ static void settings_build(ascolto_tray_ui_t *ui) {
     p->gtk_widget_show_all(p->settings_page);
 }
 static gboolean settings_delete(void *widget, void *event, gpointer data) {
-    (void)event; settings_cancel(data); s_gtk_widget_hide(widget); return TRUE;
+    (void)event; ascolto_tray_ui_t *ui = data; gtk_tray_priv_t *p = ui->gtk_impl; p->diagnostics_visible = false; s_gtk_widget_hide(widget); return TRUE;
 }
-static void on_menu_settings(void *widget, gpointer data) {
-    (void)widget; ascolto_tray_ui_t *ui = data; gtk_tray_priv_t *p = ui->gtk_impl;
-    if (!p->settings_window) {
-#define SL(name) s_##name = (settings_##name##_t)dlsym(p->gtk_lib, #name); if (!s_##name) return
+static bool settings_load_symbols(gtk_tray_priv_t *p) {
+#define SL(name) s_##name = (settings_##name##_t)dlsym(p->gtk_lib, #name); if (!s_##name) return false
+        SL(gtk_widget_get_accessible); SL(atk_object_set_name);
+        SL(gtk_progress_bar_new); SL(gtk_progress_bar_set_fraction);
         SL(gtk_window_new); SL(gtk_window_set_title); SL(gtk_window_set_default_size); SL(gtk_window_present);
         SL(gtk_box_new); SL(gtk_box_pack_start); SL(gtk_container_add); SL(gtk_container_set_border_width); SL(gtk_container_get_children);
         SL(gtk_label_new); SL(gtk_label_set_markup); SL(gtk_image_new_from_file); SL(gtk_button_set_image); SL(gtk_button_set_always_show_image); SL(gtk_css_provider_new); SL(gtk_css_provider_load_from_data); SL(gtk_widget_get_style_context); SL(gtk_style_context_add_provider); SL(gtk_label_set_xalign); SL(gtk_label_set_line_wrap); SL(gtk_label_set_text); SL(gtk_label_set_selectable);
@@ -474,19 +543,29 @@ static void on_menu_settings(void *widget, gpointer data) {
         SL(gtk_widget_set_size_request); SL(gtk_widget_hide); SL(gtk_scrolled_window_new); SL(gtk_scrolled_window_set_policy);
         SL(gtk_file_chooser_native_new);SL(gtk_file_chooser_get_filename);SL(gtk_file_chooser_set_current_folder);SL(gtk_native_dialog_show);SL(gtk_native_dialog_destroy);
 #undef SL
-        p->settings_window = s_gtk_window_new(0); s_gtk_window_set_title(p->settings_window, "Ascolto Settings"); s_gtk_window_set_default_size(p->settings_window, 1000, 780);
+    return true;
+}
+static void on_menu_settings(void *widget, gpointer data) {
+    (void)widget; ascolto_tray_ui_t *ui = data; gtk_tray_priv_t *p = ui->gtk_impl;
+    if (!p->settings_window) {
+        if (!settings_load_symbols(p)) return;
+        p->settings_window = s_gtk_window_new(0); s_gtk_window_set_title(p->settings_window, "Ascolto"); s_gtk_window_set_default_size(p->settings_window, 1180, 800);
         g_signal_connect_data(p->settings_window, "delete-event", G_CALLBACK(settings_delete), ui, NULL, 0);
-        void *layout = s_gtk_box_new(0, 16); s_gtk_container_add(p->settings_window, layout); s_gtk_container_set_border_width(layout, 18);
+        void *layout = s_gtk_box_new(0, 16); p->settings_layout = layout; s_gtk_container_add(p->settings_window, layout); s_gtk_container_set_border_width(layout, 18);
         void *sidebar = s_gtk_box_new(1, 12); s_gtk_widget_set_size_request(sidebar, 180, -1); s_gtk_box_pack_start(layout, sidebar, FALSE, FALSE, 0);
-        settings_label(p, sidebar, "Ascolto\nSettings");
+        settings_label(p, sidebar, "Ascolto");
         const char *categories[] = {"General", "AI providers", "Transcription", "Recording", "Storage"};
         for (int i=0; i<5; i++) { void *button = settings_button(ui, sidebar, categories[i], G_CALLBACK(settings_category)); g_object_set_data(button, "category", GINT_TO_POINTER(i)); }
-        settings_label(p, sidebar, "Local transcription\nWhistle · on this device");
-        void *scroll = s_gtk_scrolled_window_new(NULL, NULL); s_gtk_scrolled_window_set_policy(scroll, 2, 1); s_gtk_box_pack_start(layout, scroll, TRUE, TRUE, 0);
+        settings_button(ui, sidebar, "Activity & diagnostics", G_CALLBACK(on_menu_diagnostics));
+        settings_label(p, sidebar, "Local transcription\nOn this device");
+        void *scroll = s_gtk_scrolled_window_new(NULL, NULL); p->settings_scroll = scroll; s_gtk_scrolled_window_set_policy(scroll, 2, 1); s_gtk_box_pack_start(layout, scroll, TRUE, TRUE, 0);
         p->settings_page = s_gtk_box_new(1, 8); s_gtk_container_set_border_width(p->settings_page, 12); s_gtk_container_add(scroll, p->settings_page);
         p->settings_category = 1; snprintf(p->ai_provider, sizeof(p->ai_provider), "opencode-zen");
     }
-    settings_build(ui); p->gtk_widget_show_all(p->settings_window); s_gtk_window_present(p->settings_window);
+    if (p->settings_category == 5) p->settings_category = 1;
+    settings_build(ui); p->gtk_widget_show_all(p->settings_window);
+    if (p->diagnostics_root) s_gtk_widget_hide(p->diagnostics_root);
+    s_gtk_window_present(p->settings_window);
     if (!p->ai_state && !p->ai_worker) settings_request(ui, settings_command("status", NULL));
 }
 static void settings_sync(ascolto_tray_ui_t *ui, const ascolto_tray_snapshot_t *snapshot) {

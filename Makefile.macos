@@ -2,7 +2,7 @@
 CC       := clang
 CFLAGS   := -std=c11 -O2 -Wall -Wextra -Iinclude -Ivendor/needle
 OBJCFLAGS:= -O2 -Wall -Wextra -Iinclude -Ivendor/needle -fobjc-arc
-LDFLAGS  := vendor/needle/libneedle.a -lc++ -lsqlite3 \
+LDFLAGS  := vendor/needle/libneedle.a -lc++ -lsqlite3 -lcurl \
             -framework CoreAudio \
             -framework AudioToolbox \
             -framework AVFoundation \
@@ -12,20 +12,21 @@ LDFLAGS  := vendor/needle/libneedle.a -lc++ -lsqlite3 \
             -framework Cocoa
 
 # Keep offline simulation and acoustic fixtures out of the shipped app.
-SESSION_SRCS := src/database.c src/storage.c src/ai_settings.c src/filesystem.c src/diagnostics.c src/config.c src/mic_monitor.c \
+SESSION_SRCS := src/local_stt.c src/database.c src/storage.c src/ai_settings.c src/filesystem.c src/diagnostics.c src/config.c src/mic_monitor.c \
                 src/macos/whistle_engine.c src/macos/diarizer.c src/macos/recap.c \
                 src/live_session.c src/macos/transcript.c src/capture_buffer.c src/audio_processing.c
 CAPTURE_SRCS := src/capture_macos.c
 OFFLINE_SRCS := src/wav_audio.c tests/capture_buffer_verify.c src/simulated_monitor.c src/vad.c src/session.c src/room_bench.c
-APP_SRCS := $(SESSION_SRCS) $(CAPTURE_SRCS) src/macos/control.m src/macos/settings.m src/menubar_macos.m src/app_main.c
+APP_SRCS := $(SESSION_SRCS) $(CAPTURE_SRCS) src/macos/control.m src/macos/settings.m src/macos/activity.m src/menubar_macos.m src/app_main.c
 HARNESS_SRCS := $(SESSION_SRCS) $(CAPTURE_SRCS) $(OFFLINE_SRCS) src/harness_main.c
 REGRESSION_SRCS := $(SESSION_SRCS) tests/regression_main.c
 CONTROL_TEST_SRCS := $(SESSION_SRCS) src/macos/control.m tests/control_main.m
 HISTORY_TEST_SRCS := $(filter-out src/app_main.c,$(APP_SRCS)) tests/history_macos.m
+LOCAL_STT_PIPELINE_SRCS := $(SESSION_SRCS) $(CAPTURE_SRCS) src/wav_audio.c tests/local_stt_pipeline.c
 
 OBJ_DIR := build/macos
 objects = $(addprefix $(OBJ_DIR)/,$(addsuffix .o,$(basename $(1))))
-ALL_OBJS := $(sort $(call objects,$(APP_SRCS) $(HARNESS_SRCS) $(REGRESSION_SRCS) $(CONTROL_TEST_SRCS) $(HISTORY_TEST_SRCS)))
+ALL_OBJS := $(sort $(call objects,$(APP_SRCS) $(HARNESS_SRCS) $(REGRESSION_SRCS) $(CONTROL_TEST_SRCS) $(HISTORY_TEST_SRCS) $(LOCAL_STT_PIPELINE_SRCS)))
 $(ALL_OBJS): Makefile.macos
 -include $(ALL_OBJS:.o=.d)
 
@@ -36,8 +37,9 @@ CONTROL  := $(BIN_DIR)/ascoltoctl
 APP_BIN  := $(BIN_DIR)/ascolto
 APP_BUNDLE := $(BIN_DIR)/Ascolto.app
 BUNDLE_STAMP := $(APP_BUNDLE)/Contents/.packaged
-RUNTIME_FILES := scripts/recap.py scripts/ai_providers.py scripts/ai_workflows.py \
-                 scripts/ascolto_runtime.py scripts/ascolto_database.py scripts/ascolto_files.py scripts/organize_archive.py \
+LOCAL_STT_LIBS := $(wildcard bin/local-stt/*.dylib)
+RUNTIME_FILES := scripts/recap.py scripts/ai_providers.py scripts/ai_workflows.py scripts/ascolto_job_diagnostics.py \
+                 scripts/ascolto_runtime.py scripts/ascolto_diagnostics.py scripts/ascolto_database.py scripts/ascolto_files.py scripts/organize_archive.py \
                  scripts/database_schema.sql scripts/requirements-recap.txt
 
 .PHONY: all deps fixtures build bundle test test-capture room-bench simulate probe run clean
@@ -91,10 +93,15 @@ build: $(CONTROL) $(HARNESS) $(APP_BIN) $(REGRESSION) $(BIN_DIR)/ascolto-control
 
 bundle: $(BUNDLE_STAMP)
 
-$(BUNDLE_STAMP): $(APP_BIN) models/whistle.cact $(RUNTIME_FILES) assets/chatgpt-logo.svg $(wildcard .venv/.ascolto-runtime-ready) Makefile.macos
+assets/Ascolto.icns: assets/ascolto-app-icon.png scripts/build_app_icon.sh
+	@sh scripts/build_app_icon.sh
+
+$(BUNDLE_STAMP): $(APP_BIN) models/whistle.cact $(RUNTIME_FILES) assets/chatgpt-logo.svg assets/Ascolto.icns $(LOCAL_STT_LIBS) $(wildcard .venv/.ascolto-runtime-ready) Makefile.macos
 	@mkdir -p $(APP_BUNDLE)/Contents/MacOS $(APP_BUNDLE)/Contents/Resources
 	@cp $(APP_BIN) $(APP_BUNDLE)/Contents/MacOS/Ascolto
 	@cp assets/chatgpt-logo.svg $(APP_BUNDLE)/Contents/Resources/
+	@cp assets/Ascolto.icns $(APP_BUNDLE)/Contents/Resources/Ascolto.icns
+	@if test -d bin/local-stt; then mkdir -p $(APP_BUNDLE)/Contents/Resources/local-stt; cp -R bin/local-stt/. $(APP_BUNDLE)/Contents/Resources/local-stt/; fi
 	@cp models/whistle.cact $(APP_BUNDLE)/Contents/Resources/whistle.cact
 	@cp $(RUNTIME_FILES) $(APP_BUNDLE)/Contents/Resources/
 	@if test -x .venv/bin/python3 && .venv/bin/python3 -c 'import numpy, requests, jwt, cryptography' >/dev/null 2>&1; then \
@@ -111,6 +118,7 @@ $(BUNDLE_STAMP): $(APP_BIN) models/whistle.cact $(RUNTIME_FILES) assets/chatgpt-
 		'  <key>CFBundleIdentifier</key><string>com.cristianbianco.ascolto</string>' \
 		'  <key>CFBundleName</key><string>Ascolto</string>' \
 		'  <key>CFBundleDisplayName</key><string>Ascolto</string>' \
+		'  <key>CFBundleIconFile</key><string>Ascolto</string>' \
 		'  <key>CFBundlePackageType</key><string>APPL</string>' \
 		'  <key>CFBundleShortVersionString</key><string>1.0</string>' \
 		'  <key>LSUIElement</key><true/>' \
@@ -120,9 +128,10 @@ $(BUNDLE_STAMP): $(APP_BIN) models/whistle.cact $(RUNTIME_FILES) assets/chatgpt-
 		'  <key>NSCalendarsUsageDescription</key><string>Ascolto legge il titolo e i partecipanti della call in corso dal Calendario per arricchire la trascrizione.</string>' \
 		'</dict>' \
 		'</plist>' > $(APP_BUNDLE)/Contents/Info.plist
-	@codesign --force --deep --sign - $(APP_BUNDLE)
-	@codesign --verify --deep --strict $(APP_BUNDLE)
+	# Include the packaging marker in the resource seal on clean builds.
 	@touch $@
+	@codesign --force --deep --sign - $(APP_BUNDLE) || { rm -f "$@"; exit 1; }
+	@codesign --verify --deep --strict $(APP_BUNDLE) || { rm -f "$@"; exit 1; }
 
 test: build bundle test-portable test-history
 	@test -f tests/fixtures/spk3_turn1.wav || $(MAKE) fixtures
@@ -156,14 +165,31 @@ run: bundle
 
 clean:
 	rm -rf $(BIN_DIR) $(OBJ_DIR)
+	rm -f build/local-stt/.ready
 
 .PHONY: test-settings
-bin/ascolto-settings-test: src/macos/settings.m src/macos/settings.h src/ai_settings.c src/storage.c src/database.c src/database_schema.inc src/filesystem.c tests/settings_macos.m
+bin/ascolto-settings-test: src/macos/activity.m src/macos/activity.h src/local_stt.c src/local_stt_manifest.inc include/ascolto/local_stt.h src/macos/settings.m src/macos/settings.h src/ai_settings.c src/storage.c src/database.c src/database_schema.inc src/filesystem.c tests/settings_macos.m
 	@mkdir -p bin
-	$(CC) $(OBJCFLAGS) src/macos/settings.m src/ai_settings.c src/storage.c src/database.c src/filesystem.c tests/settings_macos.m -lsqlite3 -lpthread -framework Cocoa -o $@
+	$(CC) $(OBJCFLAGS) src/macos/activity.m src/macos/settings.m src/local_stt.c src/ai_settings.c src/storage.c src/database.c src/filesystem.c tests/settings_macos.m -lcurl -lsqlite3 -lpthread -framework Cocoa -o $@
 
 test-settings: bin/ascolto-settings-test
 	./bin/ascolto-settings-test build/settings-previews
+
+.PHONY: test-activity
+bin/ascolto-app-icon-test: tests/app_icon_macos.m src/macos/app_icon.h
+	@mkdir -p bin
+	$(CC) $(OBJCFLAGS) tests/app_icon_macos.m -framework Cocoa -o $@
+
+.PHONY: test-app-icon
+test-app-icon: bundle bin/ascolto-app-icon-test
+	./bin/ascolto-app-icon-test "$(abspath $(APP_BUNDLE))" build/app-icon-runtime.png
+
+bin/ascolto-activity-test: src/macos/settings.m src/macos/settings.h src/local_stt.c src/macos/activity.m src/macos/activity.h tests/activity_macos.m src/ai_settings.c src/storage.c src/database.c src/filesystem.c
+	@mkdir -p bin
+	$(CC) $(OBJCFLAGS) src/macos/settings.m src/local_stt.c src/macos/activity.m src/ai_settings.c src/storage.c src/database.c src/filesystem.c tests/activity_macos.m -lcurl -lsqlite3 -lpthread -framework Cocoa -o $@
+
+test-activity: bin/ascolto-activity-test
+	./bin/ascolto-activity-test build/activity-previews
 
 .PHONY: test-history
 bin/ascolto-history-test: $(call objects,$(HISTORY_TEST_SRCS)) vendor/needle/libneedle.a
@@ -172,3 +198,10 @@ bin/ascolto-history-test: $(call objects,$(HISTORY_TEST_SRCS)) vendor/needle/lib
 
 test-history: bin/ascolto-history-test
 	./bin/ascolto-history-test
+
+# Explicit, offline opt-in checks require already installed weights in TEMP_CONFIG's directory.
+$(BIN_DIR)/ascolto-local-stt-runtime: src/local_stt.c src/database.c src/storage.c src/filesystem.c src/ai_settings.c src/wav_audio.c tests/local_stt_runtime.c
+	$(CC) $(CFLAGS) $^ -lcurl -lsqlite3 -lpthread -lm -o $@
+
+$(BIN_DIR)/ascolto-local-stt-pipeline: $(call objects,$(LOCAL_STT_PIPELINE_SRCS)) vendor/needle/libneedle.a
+	$(CC) $(call objects,$(LOCAL_STT_PIPELINE_SRCS)) $(LDFLAGS) -o $@

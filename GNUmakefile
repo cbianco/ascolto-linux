@@ -62,3 +62,48 @@ test-integration: test-database
 	./bin/ascolto-storage-test
 	$(RECAP_PYTHON) -m unittest discover -s tests -p test_integration.py
 	$(RECAP_PYTHON) -m unittest discover -s tests -p test_archive_layout.py
+
+.PHONY: test-diagnostics
+test-diagnostics:
+	$(RECAP_PYTHON) -m unittest discover -s tests -p test_diagnostics.py
+
+.PHONY: local-stt-deps
+local-stt-deps:
+	sh scripts/build_local_stt.sh
+	@touch build/local-stt/.ready
+
+WITH_LOCAL_STT ?= 1
+ifeq ($(WITH_LOCAL_STT),1)
+deps: build/local-stt/.ready
+build/local-stt/.ready: src/local_stt_manifest.inc scripts/generate_local_stt_manifest.py scripts/build_local_stt.sh src/local_stt/CMakeLists.txt src/local_stt/whisper.c src/local_stt/parakeet.cpp src/local_stt/qwen.c resources/local-stt-manifest.json
+	sh scripts/build_local_stt.sh
+	@touch $@
+ifeq ($(ASCOLTO_PLATFORM),Darwin)
+$(BUNDLE_STAMP): build/local-stt/.ready
+endif
+endif
+
+ifeq ($(ASCOLTO_PLATFORM),Darwin)
+STT_TEST_LINK := -lcurl -lsqlite3 -lpthread
+STT_TEST_SHARED := -dynamiclib
+STT_TEST_SUFFIX := dylib
+else
+STT_TEST_LINK := -lcurl -lcrypto -ldl -lsqlite3 -lpthread
+STT_TEST_SHARED := -shared -fPIC
+STT_TEST_SUFFIX := so
+endif
+.PHONY: test-local-stt
+test-local-stt:
+	python3 scripts/generate_local_stt_manifest.py --check
+	@mkdir -p build/local-stt-tests/local-stt
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Iinclude $(STT_TEST_SHARED) tests/local_stt_adapter.c -o build/local-stt-tests/local-stt/whisper-turbo-q5.$(STT_TEST_SUFFIX)
+	@cp build/local-stt-tests/local-stt/whisper-turbo-q5.$(STT_TEST_SUFFIX) build/local-stt-tests/local-stt/parakeet-v3-q8.$(STT_TEST_SUFFIX)
+	@cp build/local-stt-tests/local-stt/whisper-turbo-q5.$(STT_TEST_SUFFIX) build/local-stt-tests/local-stt/qwen3-asr-1.7b.$(STT_TEST_SUFFIX)
+	$(CC) -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 -DASCOLTO_LOCAL_STT_TEST_MANIFEST -Iinclude src/local_stt.c src/database.c src/storage.c src/filesystem.c src/ai_settings.c tests/local_stt_main.c $(STT_TEST_LINK) -o build/local-stt-tests/test
+	./build/local-stt-tests/test
+
+# Explicit network check downloads only one pinned 6 KB public configuration file.
+.PHONY: test-local-stt-download
+test-local-stt-download: test-local-stt
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -DASCOLTO_LOCAL_STT_TEST_MANIFEST -DASCOLTO_LOCAL_STT_TEST_HTTPS -Iinclude src/local_stt.c src/database.c src/storage.c src/filesystem.c src/ai_settings.c tests/local_stt_download.c $(STT_TEST_LINK) -o build/local-stt-tests/download
+	./build/local-stt-tests/download

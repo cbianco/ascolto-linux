@@ -42,6 +42,9 @@ int ascolto_whistle_process_segment(
     ascolto_whistle_result_t *out_res
 );
 
+/* Encoder-only path used when another local engine recognizes the text. */
+int ascolto_whistle_embed_segment(ascolto_whistle_engine_t *, const float *, size_t, ascolto_whistle_result_t *);
+
 void ascolto_whistle_result_free(ascolto_whistle_result_t *res);
 
 /* Utility to read any 8/16/24/32-bit mono/stereo WAV file and resample to 16 kHz mono float. */

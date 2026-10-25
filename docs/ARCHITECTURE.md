@@ -12,7 +12,8 @@ Native MIC/SYS capture
     -> timestamped paired PCM queue
     -> one audio consumer (SYS before MIC)
     -> energy gate and streaming VAD
-    -> Whistle transcription and speaker identification
+    -> selected in-process local ASR + Whistle speaker embeddings
+    -> native speaker identification
     -> committed SQLite transcript + Markdown/JSONL export
     -> optional text recap from local transcript
     -> optional audio archive, then separately opted-in cloud STT/legacy worker
@@ -32,6 +33,9 @@ capture drains every queued sample before transcript/audio resources close.
 - `audio_processing.c`: RMS, streaming VAD, recent SYS envelope lookup, transcript
   filtering, MIC activity statistics and recent SYS turn history. Both controllers
   use the same echo state and matching rules; native VAD tuning stays explicit.
+- `local_stt.c` / `local_stt/`: copied model catalog state, background verified
+  downloads, session-frozen engine selection and isolated native adapters. See
+  [LOCAL_STT.md](LOCAL_STT.md).
 - `filesystem.c`: directory and parent-directory creation.
 - `database.c` / `storage.c`: native settings, committed recording data, copied
   pending turns, transcript exports and durable outbox.
@@ -40,6 +44,8 @@ capture drains every queued sample before transcript/audio resources close.
 - `scripts/ai_providers.py` / `ai_workflows.py`: secure credentials/provider calls
   and independently selected text recap/cloud transcription tasks.
 - `scripts/ascolto_files.py`: durable owner-only text publication for Python workers.
+- `scripts/ascolto_job_diagnostics.py`: bounded, content-free per-attempt progress,
+  validation locations and safe provider error metadata shared by both native UIs.
 - `scripts/recap.py`: optional cloud transcription, recap and TTS. It adapts Linux
   FLAC folders and macOS stereo M4A archives without replacing local artifacts.
 

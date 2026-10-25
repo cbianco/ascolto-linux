@@ -6,7 +6,8 @@ Gemini meeting product.
 
 ## Product decisions and research
 
-Keep Whistle as the default live ASR and diarizer. Offer two independent roles in
+Keep Whistle as the default live ASR and speaker embedding engine. Optional
+local engines replace text recognition only; see [LOCAL_STT.md](LOCAL_STT.md). Offer two independent roles in
 settings: **Recap** selects a text provider/model, while **Transcription** defaults
 to local Whistle and requires a separate cloud provider/model and audio-upload
 opt-in. A multimodal model name alone never establishes API capability.
@@ -80,6 +81,13 @@ no credential or task-preference store. It requires the provider worker contract
 The compatibility catalog reads `profiles[provider].models` for recap and
 `profiles[provider].transcription_models` for STT. The native/SQLite adapter owns
 role preferences and imports the same model DTOs.
+An OpenRouter model declaring both `response_format` and `structured_outputs`
+also receives `response_schema=RECAP_SCHEMA`. The native provider adapter sends
+strict `json_schema` output with `provider.require_parameters=true`, so routing
+cannot silently ignore the requested schema. Models without that declared
+capability keep prompt-based JSON plus local validation. A schema rejection does
+not trigger an unstructured retry or a different provider/model. See
+[OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs).
 
 ```python
 from ai_workflows import TaskSelection, WorkflowRunner, load_turns
@@ -111,7 +119,7 @@ SQLite adapters should import the returned DTOs into their model catalog.
 Use SQLite's separate recap/transcription preference records, not a shared model
 card with an inferred role. A transcription selection maps to
 `TaskSelection(provider, model)` plus `cloud_audio_opt_in`; disabled/unselected
-means local Whistle. Recap language is a display/output language, whereas STT
+means only the independently selected on-device engine. Recap language is a display/output language, whereas STT
 `language` is an optional ISO-639-1 hint. Omit the STT hint for automatic detection.
 Do not pass the literal value `auto` to the provider.
 
@@ -142,7 +150,7 @@ cannot recover missing local turns. Its distinct artifacts are
 verbose timing; invalid/out-of-range provider offsets fail validation. Missing
 provider timing is an empty array, never fabricated timestamps.
 
-Recap uses redacted transcript text, not audio. Its default source is local Whistle.
+Recap uses redacted transcript text, not audio. Its default source is the selected on-device transcript (Whistle by default).
 An explicit cloud-derived transcript can be selected with
 `source_kind="cloud_transcription"` or `"cloud_refinement"`; this provenance is
 recorded in the output. Empty cloud-result intervals are not speech evidence. It extracts bounded chunks, validates
@@ -208,11 +216,71 @@ without increasing the execution limit. Results are
 is zero or one. Go recap requires `acknowledge_go_policy:true` explicitly.
 
 `event_sink(event)` receives only `task`, `status`, `provider`, `model` and optional
-`completed`, `total`, `error_code`. Tasks are `recap|transcription`; emitted states
+`completed`, `total`, `error_code`, plus allowlisted recap stage, request/chunk
+indices, response duration and validation location/reason metadata. Tasks are `recap|transcription`; emitted states
 are `validating|running|completed|failed`. The caller owns `queued|cancelled`, job
 IDs, attempt numbers and cancellation; a retry is a new explicit attempt. Map
 these events to SQLite job snapshots. Never store tokens, transcript text, audio,
 application titles or calendar metadata in job logs.
+
+The runtime persists a bounded, owner-only `job-diagnostics/job-<id>.json` beside
+the configuration. It records planning, provider requests, validation, completed
+chunks, publication and artifact registration independently of coarse SQLite job
+transitions. Activity on both platforms shows these events and includes them in
+the safe copy preview. Missing historical diagnostics remain unavailable. Indices
+are one-based and source indices refer to the current chunk. Citation failures
+distinguish unknown sources, quotations found in another source, whitespace
+differences and unmatched text without retaining quotations or raw responses.
+Stage elapsed time measures observed waiting, never an estimated completion time.
+Provider failures retain only allowlisted HTTP status and finish-reason metadata,
+never error bodies or arbitrary provider strings.
+OpenRouter generation errors embedded in HTTP-success responses are checked at
+both the root and choice level. Their allowlisted upstream status/type distinguish
+timeouts, unavailable providers and other failures from an incomplete answer.
+The upstream status is kept separate from the transport HTTP status. See
+[OpenRouter error handling](https://openrouter.ai/docs/api_reference/errors-and-debugging).
+
+Malformed recap items and invalid evidence/owner/deadline fields permit at most
+two correction requests per chunk to the same selected provider/model. Repair
+must preserve section/item order, item counts and every note's exact text. Owner
+and deadline values may be retained or cleared to null, never reassigned. Every
+repaired result passes the original strict validator; unsupported notes cannot
+be dropped to make publication succeed. Missing note text/sections, malformed
+JSON, provider/authentication failures and exhausted request/context budgets
+fail explicitly. Correction requests count against the workflow request limit,
+and the complete correction prompt must fit the catalog context budget. Safe
+progress retains each validation reason and repair stage, including after success.
+Already valid citations and supported owner/deadline assignments are frozen
+when merging a correction, so fixing one bad reference cannot break a good one.
+The correction prompt includes the relevant redacted source and adjacent turns
+directly; this text never enters diagnostic metadata.
+The same strict validator collects all affected items and citations before a
+correction request, so the model receives the complete issue list and relevant
+redacted contexts together. Safe `validation_issue` events retain their individual
+locations rather than revealing only the first failure in each provider response.
+An invalid quotation may be replaced by multiple exact per-turn citations while
+all previously valid evidence remains intact. Replacements still obey the same
+one-to-eight citation limit and owner/deadline validation.
+
+The runtime retains only fully validated intermediate chunks in owner-only
+`Recap-history/.validated-chunks/` checkpoints. An explicit retry after failure or
+cancellation may reuse them only for an identical session, provider/model,
+language, phase, source chunk and instruction/schema fingerprint. Each cached
+chunk passes strict source validation again; corrupt entries are rejected visibly
+and recomputed with the selected model. Checkpoints are private derived meeting
+artifacts, never content in diagnostic logs or published partial recaps. They are
+removed after durable completion. Explicit regeneration after a completed recap
+starts fresh. This preserves verified work when a later provider request fails.
+
+Before requesting a correction, an incorrect source reference may be resolved
+locally when its unchanged, exact quotation occurs in precisely one turn of the
+same chunk. No fuzzy, punctuation, whitespace or cross-chunk matching is used.
+The original candidate is copied; the quote and note text remain unchanged and
+the full strict validator resolves source timing/speaker fields again. Ambiguous
+quotes and unsupported owners/deadlines still fail validation. Each resolution
+appears as a content-free `citation_resolved` event; the final artifact records
+request and resolution counts. This handles adjacent-turn ID mistakes without
+another provider request or a weaker citation check.
 
 Stable workflow errors include `unsupported_capability`, `model_unavailable`,
 `provider_policy_acknowledgement_required`, `audio_consent_required`,
@@ -246,6 +314,11 @@ The automatic adapter calculates the complete-channel request plan, bounded at
 displays request count and channel-seconds without uploading audio. Input digests
 refer to the exact loaded transcript snapshot and, for speech jobs, original audio.
 The original source files are never replaced by AI outputs.
+For an explicit manual attempt, `ascolto_runtime.py --input-budget <bytes>` (or
+the request's `input_budget`) can use a larger source chunk to reduce request
+overhead on a long call. The default remains 12,000 bytes, the catalog context
+cap and instruction reserve still apply, and no turn is truncated. The effective
+budget and complete chunk count are recorded in progress and the final artifact.
 
 The module uses Python's standard library and the existing provider worker.
 Audio decoding additionally uses ffmpeg and ffprobe; its process environment prepends the
