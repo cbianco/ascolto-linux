@@ -362,7 +362,7 @@ class ProviderManager:
             result['settings_section'] = database.settings()['settings_section']
             result['archive'] = archive_status(database)
             result['jobs'] = [dict(row) for row in database.connection.execute('SELECT id,task,status,model_label_snapshot,error_code FROM recap_jobs ORDER BY id DESC LIMIT 5')]
-            result['latest_session_state'] = (database.connection.execute('SELECT state FROM sessions ORDER BY started_at_ms DESC,id DESC LIMIT 1').fetchone() or [''])[0]
+            result['latest_session_state'] = (database.connection.execute("SELECT state FROM sessions WHERE CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json,'$.native_transcription_source_session') END IS NULL ORDER BY started_at_ms DESC,id DESC LIMIT 1").fetchone() or [''])[0]
         for provider in PROVIDERS:
             profile = dict(settings.get("profiles", {}).get(provider, {}))
             try:

@@ -156,6 +156,72 @@ def _job(db, row, stamp, config):
     return item
 
 
+def _metadata(value):
+    try:
+        decoded = json.loads(value)
+        return decoded if isinstance(decoded, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def _saved_identity(value):
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _readable_regular(path):
+    try:
+        info = Path(path).stat()
+        return stat.S_ISREG(info.st_mode) and bool(info.st_mode & 0o444) and os.access(path, os.R_OK)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _local_version(db, session, ordinal):
+    """Read persisted recognition identity and progress, never speech or audio."""
+    sid = session['id']
+    metadata = _metadata(session['metadata_json'])
+    job = db.connection.execute('SELECT * FROM native_transcription_jobs WHERE session_id=?', (sid,)).fetchone()
+    first = db.connection.execute('SELECT language,metadata_json FROM utterances WHERE session_id=? ORDER BY id LIMIT 1', (sid,)).fetchone()
+    first_metadata = _metadata(first['metadata_json']) if first else {}
+    model = (_saved_identity(metadata.get('local_model')) or _saved_identity(first_metadata.get('local_model')) or
+             (_saved_identity(job['model_id']) if job else None) or 'Unknown')
+    language = (_saved_identity(metadata.get('language')) or (_saved_identity(job['language']) if job else None) or
+                (_saved_identity(first['language']) if first else None) or 'Unknown')
+    artifact = next((row['path'] for row in db.connection.execute(
+        "SELECT path FROM artifacts WHERE session_id=? AND kind='transcript_md' AND state='ready' ORDER BY id DESC", (sid,))
+        if _readable_regular(row['path'])), None)
+    processed = job['processed_frames'] if job else 0
+    total = job['sample_count'] if job else 0
+    state = job['state'] if job else session['state']
+    return dict(session_id=sid, job_id=job['id'] if job else None, model_id=model, language=language,
+                label='Original transcript' if ordinal == 0 else f'Version {ordinal + 1}', original=ordinal == 0,
+                created_at_ms=job['queued_at_ms'] if job else session['started_at_ms'], state=state,
+                processed_samples=processed, total_samples=total,
+                progress=min(1.0, processed / total) if total else None, path=artifact,
+                cancel_requested=bool(job['cancel_requested']) if job else False,
+                can_cancel=bool(job and state in ('queued', 'running') and not job['cancel_requested']),
+                can_retry=bool(job and state in ('failed', 'cancelled')),
+                error_code=job['error_code'] if job else None)
+
+
+def _local_transcription(db, session, children):
+    versions = [_local_version(db, row, ordinal) for ordinal, row in enumerate([session, *children])]
+    original = versions[0]
+    audio = any(_readable_regular(row['path']) for row in db.connection.execute(
+        "SELECT path FROM artifacts WHERE session_id=? AND kind='audio_m4a' AND state='ready'", (session['id'],)))
+    if session['state'] not in ('completed', 'failed'):
+        reason = 'Wait until this call finishes saving.'
+    elif original['job_id'] and original['state'] in ('recording', 'queued', 'running'):
+        reason = 'Wait until the original local transcription finishes.'
+    elif session['capture_backend'] != 'coreaudio':
+        reason = 'Local re-transcription requires a supported stereo M4A call archive.'
+    elif not audio:
+        reason = 'The original saved M4A audio is unavailable or unreadable.'
+    else:
+        reason = ''
+    return dict(can_retranscribe=not reason, reason=reason, language=original['language'], versions=versions)
+
+
 def snapshot(db, config):
     """Build metadata only: never read transcript content, credentials or titles."""
     stamp = now_ms()
@@ -166,7 +232,17 @@ def snapshot(db, config):
     except Exception:
         selection = None
     calls = []
-    for session in db.connection.execute('SELECT id,started_at_ms,ended_at_ms,state FROM sessions ORDER BY started_at_ms DESC,id DESC'):
+    sessions = list(db.connection.execute('SELECT id,started_at_ms,ended_at_ms,state,capture_backend,metadata_json FROM sessions ORDER BY started_at_ms DESC,id DESC'))
+    children = {}
+    originals = []
+    for session in sessions:
+        source = _metadata(session['metadata_json']).get('native_transcription_source_session')
+        if source is not None:
+            if type(source) is int and source > 0:
+                children.setdefault(source, []).append(session)
+        else:
+            originals.append(session)
+    for session in originals:
         sid = session['id']
         count = db.connection.execute('SELECT count(*) FROM utterances WHERE session_id=?', (sid,)).fetchone()[0]
         artifacts = []
@@ -190,6 +266,7 @@ def snapshot(db, config):
             if folder.is_dir():
                 artifacts.insert(0, dict(label='Open call folder',kind='call_directory',path=str(folder),is_directory=True))
         attempts = [_job(db,r,stamp,config) for r in db.connection.execute('SELECT * FROM recap_jobs WHERE session_id=? ORDER BY id DESC', (sid,))]
+        local = _local_transcription(db, session, list(reversed(children.get(sid, []))))
         operations = []
         live = session['state'] in ('recording', 'paused', 'stopping')
         pending_export = bool(db.connection.execute('SELECT 1 FROM export_outbox WHERE session_id=?', (sid,)).fetchone())
@@ -229,7 +306,21 @@ def snapshot(db, config):
         if provisional:
             status = 'needs_attention' if provisional['status']=='failed' else 'ready' if provisional['status']=='completed' else provisional['status']
             operations.append(dict(task='recap_provisional',name='Provisional recap',status=status,reason=provisional['reason']))
-        active = any(j['status'] in ACTIVE for j in attempts)
+        native_versions = [v for v in local['versions'] if v['job_id']]
+        if native_versions:
+            latest = native_versions[-1]
+            native_status = ('needs_attention' if latest['state'] == 'failed' or
+                             (latest['state'] == 'completed' and not latest['path']) else
+                             'ready' if latest['state'] == 'completed' else latest['state'])
+            native_reason = ('Local transcription failed. Earlier transcript versions are preserved.' if latest['state'] == 'failed' else
+                             'Local transcription was cancelled. Earlier transcript versions are preserved.' if latest['state'] == 'cancelled' else
+                             'The saved local transcript version is unavailable.' if native_status == 'needs_attention' else
+                             'The local transcript version is saved.' if native_status == 'ready' else
+                             'Local transcription is queued.' if latest['state'] == 'queued' else
+                             'Local transcription is running.' if latest['state'] == 'running' else
+                             'Audio capture is still in progress.')
+            operations.append(dict(task='local_transcription', name='Local transcription versions', status=native_status, reason=native_reason))
+        active = any(j['status'] in ACTIVE for j in attempts) or any(v['state'] in ('queued', 'running') for v in native_versions)
         attention = any(o['status']=='needs_attention' for o in operations) or session['state']=='failed'
         status = 'running' if active or live else 'needs_attention' if attention else 'ready' if count else 'skipped'
         outcome = ('Processing in progress' if active else 'Saving session' if session['state']=='stopping' else 'Recording paused' if session['state']=='paused' else 'Recording in progress' if live else 'Call needs attention' if attention else 'Transcript and recap ready' if any(j['task']=='recap' and j['phase']=='final' and j['status']=='completed' for j in attempts) else 'Transcript saved' if count else 'No speech detected')
@@ -248,11 +339,16 @@ def snapshot(db, config):
         else:
             retry_reason = 'A nonempty, fully exported local transcript is required.'
         label = datetime.fromtimestamp(session['started_at_ms']/1000).astimezone().strftime('%d %b %Y · %H:%M:%S')
-        call = dict(id=sid,label=label,started_at_ms=session['started_at_ms'],state=session['state'],status=status,outcome=outcome,reason=reason,turn_count=count,needs_attention=attention,operations=operations,artifacts=artifacts,attempts=attempts,retry_request=retry,retry_reason=retry_reason)
+        call = dict(id=sid,label=label,started_at_ms=session['started_at_ms'],state=session['state'],status=status,outcome=outcome,reason=reason,turn_count=count,needs_attention=attention,operations=operations,artifacts=artifacts,attempts=attempts,retry_request=retry,retry_reason=retry_reason,local_transcription=local)
         # Explicit allowlist excludes paths, app/calendar labels, content and identity.
         report = {k:call[k] for k in ('id','started_at_ms','state','status','turn_count')}
         report['operations'] = [{k:o[k] for k in ('task','status')} for o in operations]
         report['attempts'] = [{k:j[k] for k in ('id','task','phase','attempt','status','provider','model','error_code','queued_at_ms','started_at_ms','finished_at_ms','elapsed_ms','progress_events')} for j in attempts]
+        report['local_transcription'] = {key: local[key] for key in ('can_retranscribe', 'language')}
+        report['local_transcription']['versions'] = [{key: version[key] for key in (
+            'session_id', 'job_id', 'model_id', 'language', 'created_at_ms', 'state',
+            'processed_samples', 'total_samples', 'progress', 'cancel_requested', 'error_code')}
+            for version in local['versions']]
         report['evidence_note'] = 'Failed raw responses and exact mismatched quotations are unavailable.'
         call['safe_report'] = json.dumps(report,ensure_ascii=False,indent=2)
         calls.append(call)

@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from ascolto_database import Database
+from ascolto_database import Database, DatabaseError
 from organize_archive import organize
 
 
@@ -58,6 +58,19 @@ class ArchiveLayoutTests(unittest.TestCase):
                 imported=db.import_session(call/'Data'/'transcript.jsonl')
                 self.assertEqual(db.connection.execute('SELECT capture_backend FROM sessions WHERE id=?',(imported,)).fetchone()[0],'coreaudio')
                 self.assertEqual(db.connection.execute("SELECT path FROM artifacts WHERE kind='transcript_md'").fetchone()[0],str(call/'transcript.md'))
+
+    def test_queued_local_transcription_blocks_archive_relocation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            root = base / 'Archive'
+            root.mkdir()
+            with Database(base / 'ascolto.sqlite3') as db:
+                db.update_settings({'output_dir': str(root)})
+                session = db.connection.execute("INSERT INTO sessions(started_at_ms,state,capture_backend) VALUES(1792053000000,'completed','coreaudio')").lastrowid
+                db.connection.execute("INSERT INTO native_transcription_jobs(session_id,state,model_id,language,keywords,diarizer_threshold,mic_path,sys_path,queued_at_ms) VALUES(?,'queued','whistle','it','',0.6,?,?,1792053000000)", (session, str(root / '.mic.f32'), str(root / '.sys.f32')))
+            with self.assertRaisesRegex(DatabaseError, 'local or cloud jobs'):
+                organize(base / 'config.json')
+            self.assertEqual(list(root.iterdir()), [])
 
     def test_failed_copy_keeps_original_paths_and_a_database_backup(self):
         from unittest.mock import patch

@@ -52,6 +52,7 @@
 @property (weak) id actionTarget;
 @property NSView* page;
 @property NSView* sidebar;
+@property NSInteger nemotronBits;
 @property NSScrollView* pageScroll;
 @property NSView* canvas;
 @property BOOL nativeMenuTracking;
@@ -142,6 +143,7 @@
         [_canvas addSubview:_page];
         [window.contentView addSubview:_pageScroll];
         _activity = [[AscoltoActivityViewController alloc] initWithConfig:_options()[@"config"]];
+        [self configureActivity];
         [self buildPage];
     }
     return self;
@@ -205,13 +207,15 @@
 - (void)buildPage {
     for (NSView* view in _page.subviews.copy) [view removeFromSuperview];
     _nativePopups = [NSMutableArray array];
-    _sidebar.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;
+    [self.window.effectiveAppearance performAsCurrentDrawingAppearance:^{
+        self.sidebar.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;
+        self.page.layer.backgroundColor = NSColor.controlBackgroundColor.CGColor;
+    }];
     for (NSView* view in _sidebar.subviews) if ([view isKindOfClass:NSButton.class]) {
         NSButton* button = (NSButton*)view; button.state = [button.identifier isEqual:_category];
     }
     _localRows = nil;
     _notice = nil; _archiveLocation = nil; _monitoring = nil; _saveAudio = nil; _legacy = nil; _legacyTTS = nil;
-    _page.layer.backgroundColor = NSColor.controlBackgroundColor.CGColor;
     [self layoutSharedWindow];
     if ([_category isEqual:@"Activity & diagnostics"]) {
         _activity.view.frame = _page.bounds;
@@ -225,7 +229,7 @@
     if ([_category isEqual:@"General"]) {
         [self addLabel:@"Choose when Ascolto listens and manage system permissions." y:660 size:13 bold:NO];
         _monitoring = [self nativeButton:@"Automatic monitoring" selector:@selector(onToggleAutoTrigger:) y:596 check:YES value:[values[@"automatic"] boolValue]];
-        [self addLabel:@"Mirrors the shortcut in the menu bar. Microphone activity from call apps starts local transcription." y:538 size:12 bold:NO];
+        [self addLabel:@"Mirrors the shortcut in the menu bar. Microphone activity from call apps starts recording. Local transcription runs after the call." y:538 size:12 bold:NO];
         [self addLabel:@"Permissions" y:464 size:17 bold:YES];
         [self nativeButton:@"Microphone privacy settings…" selector:@selector(onMicrophonePrivacy:) y:418 check:NO value:NO];
         [self nativeButton:@"Allow call audio capture…" selector:@selector(onRequestSysAudioPermission:) y:372 check:NO value:NO];
@@ -258,12 +262,13 @@
         [self addLabel:@"Choose audio sources and optional archives. Changes apply to the next session." y:660 size:13 bold:NO];
         [self addPopup:values[@"micMenu"] label:@"Microphone" y:574];
         [self addPopup:values[@"sysMenu"] label:@"Call audio" y:476];
-        _saveAudio = [self nativeButton:@"Save compressed audio (M4A · about 21 MB/hour)" selector:@selector(onToggleSaveAudio:) y:394 check:YES value:[values[@"saveAudio"] boolValue]];
-        [self addLabel:@"Legacy cloud tools" y:316 size:17 bold:YES];
-        [self addLabel:@"Separate opt-in workflow: uploads audio to OpenAI for transcription, then uses Claude CLI. Requires its existing API key and CLI setup." y:250 size:12 bold:NO];
-        _legacy = [self nativeButton:@"Legacy automatic cloud transcription and recap" selector:@selector(onToggleCloudRecap:) y:206 check:YES value:[values[@"cloudRecap"] boolValue]];
-        _legacyTTS = [self nativeButton:@"Legacy spoken recap (OpenAI TTS)" selector:@selector(onToggleRecapTTS:) y:164 check:YES value:[values[@"tts"] boolValue]];
-        [self nativeButton:@"Generate latest legacy cloud recap" selector:@selector(onRunLegacyRecap:) y:112 check:NO value:NO];
+        _saveAudio = [self nativeButton:@"Keep compressed audio after transcription (M4A · about 21 MB/hour)" selector:@selector(onToggleSaveAudio:) y:394 check:YES value:[values[@"saveAudio"] boolValue]];
+        [self addLabel:@"Temporary local audio uses about 461 MB/hour until transcription finishes. Failed or cancelled jobs retain audio for retry." y:344 size:12 bold:NO];
+        [self addLabel:@"Legacy cloud tools" y:292 size:17 bold:YES];
+        [self addLabel:@"Separate opt-in workflow: uploads audio to OpenAI for transcription, then uses Claude CLI. Requires its existing API key and CLI setup." y:226 size:12 bold:NO];
+        _legacy = [self nativeButton:@"Legacy automatic cloud transcription and recap" selector:@selector(onToggleCloudRecap:) y:182 check:YES value:[values[@"cloudRecap"] boolValue]];
+        _legacyTTS = [self nativeButton:@"Legacy spoken recap (OpenAI TTS)" selector:@selector(onToggleRecapTTS:) y:140 check:YES value:[values[@"tts"] boolValue]];
+        [self nativeButton:@"Generate latest legacy cloud recap" selector:@selector(onRunLegacyRecap:) y:88 check:NO value:NO];
     } else if ([_category isEqual:@"Storage"]) {
         [self addLabel:@"Archive folder" y:624 size:17 bold:YES];
         NSTextField* location = [self label:values[@"output"] size:14 bold:NO];
@@ -295,9 +300,16 @@
     _transcriptionTab = sender.selectedSegment; [self buildPage];
 }
 - (void)buildLocalTranscription:(NSDictionary*)values {
-    _localRows = [[NSView alloc] initWithFrame:NSMakeRect(30, 254, 770, 394)];
-    [_page addSubview:_localRows];
+    NSScrollView* catalog = [[NSScrollView alloc] initWithFrame:NSMakeRect(30,254,770,394)];
+    catalog.hasVerticalScroller = YES;
+    catalog.autohidesScrollers = NO;
+    catalog.drawsBackground = NO;
+    _localRows = [[NSView alloc] initWithFrame:NSMakeRect(0,0,750,42+88*(ASCOLTO_LOCAL_MODEL_COUNT-1)+42)];
+    catalog.documentView = _localRows;
+    [_page addSubview:catalog];
     [self renderLocalModels];
+    [catalog.contentView scrollToPoint:NSMakePoint(0,_localRows.frame.size.height-catalog.contentSize.height)];
+    [catalog reflectScrolledClipView:catalog.contentView];
     NSTextField* note = [self label:@"Small Italian sample, automatic reference; not certified accuracy. Whisper shares the reference model family." size:11 bold:NO];
     note.textColor = NSColor.secondaryLabelColor; note.frame = NSMakeRect(30, 210, 600, 36); [_page addSubview:note];
     NSButton* comparison = [self button:@"View comparison…" action:@selector(showLocalComparison:)]; comparison.frame = NSMakeRect(640, 216, 160, 30); [_page addSubview:comparison];
@@ -313,6 +325,10 @@
     NSButton* save=[self button:@"Save keywords" action:@selector(saveKeywords:)];save.frame=NSMakeRect(410,88,160,30);[_page addSubview:save];
     _notice=[self label:_message ?: @"Downloads and recognition stay on this device. Choosing a model does not enable cloud audio upload." size:12 bold:NO];_notice.frame=NSMakeRect(30,22,740,48);[_page addSubview:_notice];
 }
+- (void)selectNemotronBits:(NSSegmentedControl*)sender {
+    _nemotronBits = [sender tagForSegment:sender.selectedSegment];
+    [self renderLocalModels];
+}
 - (void)renderLocalModels {
     if (!_localRows || _renderingLocal) return;
     _renderingLocal = YES;
@@ -324,36 +340,61 @@
     _localRevision = snapshot.revision;
     _lastLocalBusy = [_options()[@"busy"] boolValue];
     NSString* selected=@(snapshot.selected);NSString* active=@(snapshot.active);
-    for(int i=0;i<4;i++){if(!strcmp(snapshot.models[i].id,snapshot.selected))selected=@(snapshot.models[i].name);if(!strcmp(snapshot.models[i].id,snapshot.active))active=@(snapshot.models[i].name);}
-    NSString* status = snapshot.active[0] ? [NSString stringWithFormat:@"Recording with %@ · Next session: %@", active, selected] : [NSString stringWithFormat:@"Next session: %@ · %.2f GB available", selected, snapshot.available_bytes / 1e9];
+    for(int i=0;i<ASCOLTO_LOCAL_MODEL_COUNT;i++){if(!strcmp(snapshot.models[i].id,snapshot.selected))selected=@(snapshot.models[i].name);if(!strcmp(snapshot.models[i].id,snapshot.active))active=@(snapshot.models[i].name);}
+    NSString* status = snapshot.active[0] ? [NSString stringWithFormat:@"Transcribing with %@ · Next call: %@", active, selected] : [NSString stringWithFormat:@"Next call: %@ · %.2f GB available", selected, snapshot.available_bytes / 1e9];
     if (snapshot.error[0]) status = @(snapshot.error);
-    NSTextField* header=[self label:status size:12 bold:NO]; header.frame=NSMakeRect(0,356,765,38);header.textColor=snapshot.error[0]?NSColor.systemRedColor:NSColor.secondaryLabelColor;[_localRows addSubview:header];
+    CGFloat top=_localRows.bounds.size.height-38;
+    NSTextField* header=[self label:status size:12 bold:NO]; header.frame=NSMakeRect(0,top,750,38);header.textColor=snapshot.error[0]?NSColor.systemRedColor:NSColor.secondaryLabelColor;[_localRows addSubview:header];
+    if (!_nemotronBits) {
+        _nemotronBits = ascolto_nemotron_bits(snapshot.selected);
+        if (!_nemotronBits) _nemotronBits = 8;
+    }
+    int row = 0;
     for (int i=0;i<ASCOLTO_LOCAL_MODEL_COUNT;i++) {
         ascolto_model_snapshot_t* model=&snapshot.models[i];
+        int bits = ascolto_nemotron_bits(model->id);
+        if (bits && bits != _nemotronBits) continue;
         if (!model->id[0]) continue;
-        CGFloat y=266-i*88;
-        NSTextField* name=[self label:@(model->name) size:14 bold:YES];name.frame=NSMakeRect(0,y+58,580,24);[_localRows addSubview:name];
-        NSTextField* description=[self label:@(model->description) size:12 bold:NO];description.frame=NSMakeRect(0,y+30,590,30);description.textColor=NSColor.secondaryLabelColor;[_localRows addSubview:description];
+        CGFloat y=top-90-row++*88-(bits?42:0);
+        NSTextField* name=[self label:bits?@"Nemotron 3.5 Transcribe":@(model->name) size:14 bold:YES];name.frame=NSMakeRect(0,y+58+(bits?42:0),575,24);[_localRows addSubview:name];
+        if (bits) {
+            NSSegmentedControl* precision=[NSSegmentedControl segmentedControlWithLabels:@[@"8 bit", @"16 bit"] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(selectNemotronBits:)];
+            precision.identifier=@"nemotronPrecision"; precision.accessibilityLabel=@"Nemotron weight precision";
+            precision.frame=NSMakeRect(0,y+64,260,28);
+            const int choices[]={8,16};
+            for(int segment=0;segment<2;segment++) {
+                [precision setTag:choices[segment] forSegment:segment];
+                if(choices[segment]==bits) precision.selectedSegment=segment;
+                for(int variant=0;variant<ASCOLTO_LOCAL_MODEL_COUNT;variant++) {
+                    const ascolto_model_snapshot_t* item=&snapshot.models[variant];
+                    if(ascolto_nemotron_bits(item->id)!=choices[segment]) continue;
+                    NSString* state=item->selected?@"Selected":item->state==ASCOLTO_MODEL_READY?@"Downloaded":item->state==ASCOLTO_MODEL_DOWNLOADING?@"Downloading":item->state==ASCOLTO_MODEL_VERIFYING?@"Preparing / verifying":item->state==ASCOLTO_MODEL_ERROR?@"Needs attention":@"Not ready";
+                    [precision setToolTip:[NSString stringWithFormat:@"%@ · %@",@(item->name),state] forSegment:segment];
+                }
+            }
+            [_localRows addSubview:precision];
+        }
+        NSTextField* description=[self label:@(model->description) size:12 bold:NO];description.frame=NSMakeRect(0,y+30,585,30);description.textColor=NSColor.secondaryLabelColor;[_localRows addSubview:description];
         NSString* detail;
         if (model->state==ASCOLTO_MODEL_DOWNLOADING) detail=[NSString stringWithFormat:@"Downloading %.1f / %.1f MB",model->transferred/1e6,model->bytes/1e6];
-        else if (model->state==ASCOLTO_MODEL_VERIFYING) detail=@"Verifying download…";
+        else if (model->state==ASCOLTO_MODEL_VERIFYING) detail=model->message[0]?@(model->message):@"Verifying download…";
         else if (model->state==ASCOLTO_MODEL_CHECKING) detail=@"Checking model files…";
         else if (model->message[0]) detail=@(model->message);
         else detail=model->state==ASCOLTO_MODEL_READY?@"Downloaded · verified":model->state==ASCOLTO_MODEL_MISSING?@"Not downloaded":@(model->hint);
         if(model->bytes && (model->state==ASCOLTO_MODEL_MISSING || model->state==ASCOLTO_MODEL_READY)) detail=[NSString stringWithFormat:@"%@ · %@ · %.1f MB download",detail,@(model->hint),model->bytes/1e6];
         if(i==2 && model->selected)detail=[detail stringByAppendingString:@" · Automatic language; keyword prompts unavailable"];
         if(model->selected)detail=[@"Selected · " stringByAppendingString:detail];
-        NSTextField* state=[self label:detail size:11 bold:NO];state.frame=NSMakeRect(0,y+5,590,27);[_localRows addSubview:state];
-        if(model->state==ASCOLTO_MODEL_DOWNLOADING){NSProgressIndicator* progress=[[NSProgressIndicator alloc] initWithFrame:NSMakeRect(0,y+1,580,5)];progress.indeterminate=NO;progress.maxValue=model->bytes;progress.doubleValue=model->transferred;[_localRows addSubview:progress];}
+        NSTextField* state=[self label:detail size:11 bold:NO];state.frame=NSMakeRect(0,y+5,585,27);[_localRows addSubview:state];
+        if(model->state==ASCOLTO_MODEL_DOWNLOADING){NSProgressIndicator* progress=[[NSProgressIndicator alloc] initWithFrame:NSMakeRect(0,y+1,575,5)];progress.indeterminate=NO;progress.maxValue=model->bytes;progress.doubleValue=model->transferred;[_localRows addSubview:progress];}
         NSString* action;NSString* title;
         if(model->state==ASCOLTO_MODEL_INCLUDED || model->state==ASCOLTO_MODEL_READY){action=@"use";title=model->selected?@"Selected":snapshot.active[0]?@"Use next session":@"Use model";}
         else if(model->state==ASCOLTO_MODEL_DOWNLOADING || model->state==ASCOLTO_MODEL_VERIFYING){action=@"cancel";title=@"Cancel";}
         else {action=@"download";title=model->state==ASCOLTO_MODEL_ERROR?@"Retry download":@"Download";}
-        NSButton* button=[self button:title action:@selector(localModelAction:)];button.identifier=[NSString stringWithFormat:@"%@:%s",action,model->id];button.frame=NSMakeRect(610,y+46,155,30);button.enabled=![_options()[@"busy"] boolValue] && (!model->selected || ![action isEqual:@"use"]) && model->state!=ASCOLTO_MODEL_CHECKING && model->state!=ASCOLTO_MODEL_UNSUPPORTED;
+        NSButton* button=[self button:title action:@selector(localModelAction:)];button.identifier=[NSString stringWithFormat:@"%@:%s",action,model->id];button.frame=NSMakeRect(595,y+46,155,30);button.enabled=![_options()[@"busy"] boolValue] && (!model->selected || ![action isEqual:@"use"]) && model->state!=ASCOLTO_MODEL_CHECKING && model->state!=ASCOLTO_MODEL_UNSUPPORTED;
         if([action isEqual:@"cancel"])button.enabled=YES;
         button.accessibilityLabel=[NSString stringWithFormat:@"%@: %@",title,@(model->name)];
         [_localRows addSubview:button];
-        if(i && !model->selected && !model->active && (model->state==ASCOLTO_MODEL_READY || model->state==ASCOLTO_MODEL_ERROR)){NSButton* remove=[self button:@"Remove…" action:@selector(localModelAction:)];remove.identifier=[@"remove:" stringByAppendingString:@(model->id)];remove.accessibilityLabel=[NSString stringWithFormat:@"Remove %@",@(model->name)];remove.frame=NSMakeRect(610,y+10,155,28);remove.enabled=![_options()[@"busy"] boolValue];[_localRows addSubview:remove];}
+        if(i && !model->selected && !model->active && (model->state==ASCOLTO_MODEL_READY || model->state==ASCOLTO_MODEL_ERROR)){NSButton* remove=[self button:@"Remove…" action:@selector(localModelAction:)];remove.identifier=[@"remove:" stringByAppendingString:@(model->id)];remove.accessibilityLabel=[NSString stringWithFormat:@"Remove %@",@(model->name)];remove.frame=NSMakeRect(595,y+10,155,28);remove.enabled=![_options()[@"busy"] boolValue];[_localRows addSubview:remove];}
     }
     _renderingLocal = NO;
 }
@@ -594,6 +635,7 @@
 - (void)cancelWorker { _pendingTask=nil; NSTask* task = _worker; _worker = nil; _busy = NO; if (task.running) [task terminate]; }
 - (void)windowWillClose:(NSNotification*)notification {
     (void)notification; _closing = YES; [self cancelWorker];
+    [_activity cancelLocalPreparation];
     _secureKey.stringValue = @""; _plainKey.stringValue = @"";
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
 }
@@ -616,9 +658,20 @@
 }
 - (void)showActivity {
     _closing=NO; _userNavigated=YES; _category=@"Activity & diagnostics";
+    [self configureActivity];
     [self buildPage];
     [self presentMainWindow];
     [_activity showActivity];
+}
+- (void)configureActivity {
+    NSDictionary* values=_options();
+    __weak AscoltoSettingsWindow* weakSelf=self;
+    [_activity configureLocalModels:[values[@"localModels"] pointerValue] fixture:values[@"localModelsFixture"] languageMenu:values[@"languageMenu"] manageModels:^{
+        AscoltoSettingsWindow* owner=weakSelf; if(!owner) return;
+        owner.category=@"Transcription"; owner.transcriptionTab=0; owner.userNavigated=YES;
+        [owner buildPage];
+        if(!owner.busy) [owner request:@{@"action":@"section",@"section":@"Transcription"}];
+    }];
 }
 - (NSInteger)attentionCount { return _activity.attentionCount; }
 - (void)stopActivityRefresh { [_activity stopRefreshing]; }

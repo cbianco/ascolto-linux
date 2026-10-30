@@ -82,6 +82,7 @@ typedef struct {
     void *stt_model, *stt_consent, *stt_auto;
     int settings_category;
     bool settings_cloud_tab;
+    int nemotron_bits;
     uint64_t local_revision;
     bool local_action_pending;
     void *local_models_box;

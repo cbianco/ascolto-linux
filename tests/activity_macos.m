@@ -1,6 +1,29 @@
 #import <Cocoa/Cocoa.h>
 #import "../src/macos/activity.h"
 #import "../src/macos/settings.h"
+#include "ascolto/retranscribe.h"
+#include <stdatomic.h>
+
+static atomic_bool enqueueCalled, enqueueWaitForCancel;
+static atomic_int enqueueFailure;
+static BOOL enqueueWasBackground;
+static NSString *enqueuedModel, *enqueuedLanguage;
+static int64_t enqueuedCall;
+static BOOL enqueueCancelled;
+int ascolto_retranscribe_enqueue(const char* config, const ascolto_local_models_snapshot_t* catalog,
+    int64_t source, const char* model, const char* language, bool (*cancelled)(void*), void* context,
+    int64_t* job, char* error, size_t cap) {
+    @autoreleasepool {
+        NSCAssert(!strcmp(config,"/unused/config.json") && catalog->models[0].id[0],@"Preparation receives immutable config and copied catalog");
+        enqueuedCall=source; enqueuedModel=@(model); enqueuedLanguage=@(language); enqueueWasBackground=!NSThread.isMainThread;
+        enqueueCalled=YES;
+        while(enqueueWaitForCancel && !cancelled(context)) [NSThread sleepForTimeInterval:0.002];
+        enqueueCancelled=cancelled(context);
+        if(enqueueCancelled) { snprintf(error,cap,"cancelled"); return 4; }
+        if(enqueueFailure) { snprintf(error,cap,"source_audio_missing"); return 5; }
+        *job=101; return 0;
+    }
+}
 
 @interface AscoltoActivityViewController (Testing)
 - (void)render;
@@ -23,6 +46,20 @@ static NSButton* findButton(NSView* view, NSString* title) {
     for(NSView* child in view.subviews) { NSButton* found=findButton(child,title); if(found) return found; }
     return nil;
 }
+static NSView* findIdentifier(NSView* view, NSString* identifier) {
+    if([view.identifier isEqual:identifier]) return view;
+    for(NSView* child in view.subviews) { NSView* found=findIdentifier(child,identifier); if(found) return found; }
+    return nil;
+}
+static void pumpUntil(BOOL (^ready)(void)) {
+    NSDate* deadline=[NSDate dateWithTimeIntervalSinceNow:3];
+    while(!ready() && deadline.timeIntervalSinceNow>0) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    NSCAssert(ready(),@"The background action must complete without blocking the main run loop");
+}
+static NSUInteger visibleTopLevelWindows(void) {
+    NSUInteger count=0; for(NSWindow* window in NSApp.windows) if(window.visible && !window.sheetParent) count++;
+    return count;
+}
 
 int main(int argc, const char** argv) {
     @autoreleasepool {
@@ -30,30 +67,94 @@ int main(int argc, const char** argv) {
         NSString* output=argc>1?@(argv[1]):@"build/activity-previews";
         [[NSFileManager defaultManager] createDirectoryAtPath:output withIntermediateDirectories:YES attributes:nil error:NULL];
         ActivityFixtureWindow* controller=[[ActivityFixtureWindow alloc] initWithConfig:@"/unused/config.json"]; [controller stopRefreshing];
+        ascolto_local_models_snapshot_t catalog={0};
+        snprintf(catalog.models[0].id,sizeof(catalog.models[0].id),"whistle"); snprintf(catalog.models[0].name,sizeof(catalog.models[0].name),"Whistle"); catalog.models[0].state=ASCOLTO_MODEL_INCLUDED;
+        snprintf(catalog.models[1].id,sizeof(catalog.models[1].id),"whisper-turbo"); snprintf(catalog.models[1].name,sizeof(catalog.models[1].name),"Whisper"); catalog.models[1].state=ASCOLTO_MODEL_READY;
+        snprintf(catalog.models[2].id,sizeof(catalog.models[2].id),"qwen"); catalog.models[2].state=ASCOLTO_MODEL_MISSING;
+        snprintf(catalog.selected,sizeof(catalog.selected),"whisper-turbo");
+        NSData* modelFixture=[NSData dataWithBytes:&catalog length:sizeof(catalog)];
+        NSMenu* languageMenu=[[NSMenu alloc] init];
+        for(NSString* language in @[@"auto",@"en",@"it"]) { NSMenuItem* item=[[NSMenuItem alloc] initWithTitle:language action:nil keyEquivalent:@""]; item.representedObject=language; if([language isEqual:@"en"]) item.state=NSControlStateValueOn; [languageMenu addItem:item]; }
         AscoltoSettingsWindow* host=[[AscoltoSettingsWindow alloc] initWithOptions:^NSDictionary* {
-            return @{@"config":@"/tmp/ascolto-unified-preview/config.json"};
+            return @{@"config":@"/tmp/ascolto-unified-preview/config.json",@"localModelsFixture":modelFixture,@"languageMenu":languageMenu};
         } target:nil];
         [host stopActivityRefresh];
         [host setValue:controller forKey:@"activity"];
         [host showActivity];
         NSWindow* originalWindow=host.window;
         NSCAssert(NSApp.activationPolicy==NSApplicationActivationPolicyRegular,@"An open main window must be available to the Dock and Command-Tab");
-        NSUInteger originalWindowCount=NSApp.windows.count;
+        NSUInteger originalWindowCount=visibleTopLevelWindows();
         NSCAssert(controller.view.window==originalWindow,@"Diagnostics must be embedded in the single app window");
         NSDictionary* attempt=@{@"id":@6,@"task":@"recap",@"phase":@"final",@"attempt":@1,@"status":@"failed",@"provider":@"openrouter",@"model":@"fixture/model",@"model_label":@"Fixture model",@"error_code":@"invalid_evidence",@"reason":@"A generated citation did not match the transcript. Publication was blocked.",@"queued_at_ms":@1792146408690,@"started_at_ms":@1792146408696,@"finished_at_ms":@1792146442002,@"elapsed_ms":@33312,@"events":@[@{@"status":@"queued",@"at_ms":@1792146408690},@{@"status":@"running",@"at_ms":@1792146408696},@{@"status":@"failed",@"at_ms":@1792146442002}],@"cancel_request":NSNull.null};
         attempt = [attempt mutableCopy];
         [(NSMutableDictionary*)attempt setObject:@[@{@"at_ms":@1792146442002,@"description":@"Chunk 3 of 18; Stage: validation; Section: actions; Item: 2; Citation: 1; Reason: quote_not_in_source."}] forKey:@"progress_events"];
         NSDictionary* failed=@{@"id":@45,@"label":@"16 Oct 2026 · 12:21",@"started_at_ms":@1792146065444,@"state":@"completed",@"status":@"needs_attention",@"outcome":@"Recap needs attention",@"reason":@"Transcript saved. A generated citation did not match the source transcript.",@"turn_count":@91,@"needs_attention":@YES,@"operations":@[@{@"task":@"local_transcript",@"name":@"Local transcript",@"status":@"ready",@"reason":@"91 committed turns"},@{@"task":@"recap",@"name":@"Final recap",@"status":@"failed",@"reason":@"Publication blocked by evidence validation."}],@"artifacts":@[@{@"label":@"Open transcript",@"path":@"/fixture/transcript.md",@"is_directory":@NO}],@"attempts":@[attempt],@"retry_request":@{@"action":@"recap",@"session_id":@45,@"expected_provider":@"openrouter",@"expected_model":@"fixture/model"},@"safe_report":@"Session 45\nError: invalid_evidence\nNo captured content."};
-        NSMutableDictionary* empty=[failed mutableCopy]; empty[@"id"]=@47; empty[@"label"]=@"16 Oct 2026 · 13:06"; empty[@"status"]=@"Skipped"; empty[@"outcome"]=@"No speech detected"; empty[@"reason"]=@"No recap input."; empty[@"turn_count"]=@0; empty[@"needs_attention"]=@NO; empty[@"attempts"]=@[]; empty[@"retry_request"]=NSNull.null; empty[@"retry_reason"]=@"No committed speech to summarize.";
+        failed=[failed mutableCopy];
+        [(NSMutableDictionary*)failed setObject:@{@"can_retranscribe":@YES,@"reason":@"Saved audio is available for a new local transcription.",@"language":@"it",@"versions":@[@{@"label":@"Original transcript",@"original":@YES,@"model_id":@"whistle",@"created_at_ms":@1792146065444,@"state":@"ready"},@{@"label":@"Version 2",@"original":@NO,@"model_id":@"whisper-turbo",@"created_at_ms":@1792146465444,@"state":@"running",@"progress":@0.42},@{@"label":@"Version 3",@"original":@NO,@"model_id":@"whisper-turbo",@"created_at_ms":@1792146465444,@"state":@"ready",@"path":@"/fixture/version/transcript.md"}]} forKey:@"local_transcription"];
+        NSMutableDictionary* empty=[failed mutableCopy]; empty[@"id"]=@47; empty[@"label"]=@"16 Oct 2026 · 13:06"; empty[@"status"]=@"Skipped"; empty[@"outcome"]=@"No speech detected"; empty[@"reason"]=@"No recap input."; empty[@"turn_count"]=@0; empty[@"needs_attention"]=@NO; empty[@"attempts"]=@[]; empty[@"retry_request"]=NSNull.null; empty[@"retry_reason"]=@"No committed speech to summarize."; empty[@"local_transcription"]=@{@"can_retranscribe":@NO,@"reason":@"Saved audio is missing or unreadable.",@"language":@"Unknown",@"versions":@[]};
         [controller setValue:@{@"summary":@{@"total_calls":@2,@"needs_attention":@1,@"running":@0},@"calls":@[empty,failed]} forKey:@"snapshot"];
         [controller render];
         NSCAssert(containsText(host.window.contentView,@"No speech detected"),@"Empty calls remain visible");
         NSCAssert(containsText([controller valueForKey:@"calls"],@"12:21"),@"Earlier failed calls remain listed");
         NSCAssert(controller.attentionCount==1,@"Attention count belongs to all calls");
+        NSCAssert(!findButton([controller valueForKey:@"detail"],@"Transcribe again…").enabled && containsText([controller valueForKey:@"detail"],@"Saved audio is missing"),@"Missing audio disables retranscription with an explanation");
         NSSegmentedControl* filter=[controller valueForKey:@"filter"]; filter.selectedSegment=1; [controller render];
         NSCAssert(containsText([controller valueForKey:@"detail"],@"Transcript saved"),@"Evidence failure must not imply transcript loss");
         NSCAssert(containsText([controller valueForKey:@"detail"],@"Generate / retry recap"),@"Explicit retry is reachable");
         NSCAssert(!containsText([controller valueForKey:@"calls"],@"13:06"),@"Attention filter removes successful/empty calls");
+        NSCAssert(containsText([controller valueForKey:@"detail"],@"42% processed") && findButton([controller valueForKey:@"detail"],@"Open transcript") && findButton([controller valueForKey:@"detail"],@"Open version transcript"),@"Versions expose progress and preserve the original transcript action");
+        NSButton* transcribe=findButton([controller valueForKey:@"detail"],@"Transcribe again…");
+        [transcribe performClick:nil];
+        NSAlert* transcriptionSheet=[controller valueForKey:@"transcriptionSheet"];
+        NSCAssert(transcriptionSheet.window.sheetParent==host.window,@"Retranscription uses a sheet in the shared window");
+        NSPopUpButton* models=(NSPopUpButton*)findIdentifier(transcriptionSheet.accessoryView,@"retranscribeModel");
+        NSPopUpButton* languages=(NSPopUpButton*)findIdentifier(transcriptionSheet.accessoryView,@"retranscribeLanguage");
+        NSCAssert(models.numberOfItems==2 && [models.selectedItem.representedObject isEqual:@"whisper-turbo"],@"Only installed ready models are offered");
+        NSCAssert([languages.selectedItem.representedObject isEqual:@"it"],@"The call language overrides the current default");
+        [models selectItemAtIndex:0];
+        [transcriptionSheet.buttons[0] performClick:nil];
+        pumpUntil(^BOOL { return [controller valueForKey:@"localPreparation"]==nil && enqueueCalled; });
+        NSCAssert(enqueueWasBackground && enqueuedCall==45 && [enqueuedModel isEqual:@"whistle"] && [enqueuedLanguage isEqual:@"it"],@"The actual Add to queue action freezes the selected call, model and language on a background queue");
+        NSCAssert(containsText([controller valueForKey:@"detail"],@"Added to the local transcription queue"),@"Queued feedback is independent of recap requests");
+        NSCAssert(!strcmp(catalog.selected,"whisper-turbo"),@"Retranscribing does not change the default model");
+        ascolto_local_models_snapshot_t grouped=catalog;
+        snprintf(grouped.models[4].id,40,"nemotron-3.5-q8"); grouped.models[4].state=ASCOLTO_MODEL_READY;
+        snprintf(grouped.models[5].id,40,"nemotron-3.5-bf16-ssd"); grouped.models[5].state=ASCOLTO_MODEL_MISSING;
+        snprintf(grouped.selected,40,"nemotron-3.5-q8");
+        [controller configureLocalModels:NULL fixture:[NSData dataWithBytes:&grouped length:sizeof(grouped)] languageMenu:languageMenu manageModels:nil];
+        [findButton([controller valueForKey:@"detail"],@"Transcribe again…") performClick:nil];
+        transcriptionSheet=[controller valueForKey:@"transcriptionSheet"];
+        models=(NSPopUpButton*)findIdentifier(transcriptionSheet.accessoryView,@"retranscribeModel");
+        NSSegmentedControl* precision=(NSSegmentedControl*)findIdentifier(transcriptionSheet.accessoryView,@"retranscribePrecision");
+        NSCAssert(models.numberOfItems==3 && [models.selectedItem.title isEqual:@"Nemotron 3.5 Transcribe"],@"Installed Nemotron variants share one entry");
+        NSCAssert(precision.segmentCount==2 && precision.selectedSegment==0 && [precision isEnabledForSegment:0] && ![precision isEnabledForSegment:1],@"Only installed precisions can be queued");
+        precision.selectedSegment=0; [NSApp sendAction:precision.action to:precision.target from:precision];
+        NSCAssert([models.selectedItem.representedObject isEqual:@"nemotron-3.5-q8"],@"Precision selection resolves the correct package");
+        precision.selectedSegment=0; [NSApp sendAction:precision.action to:precision.target from:precision];
+        enqueueCalled=NO; [transcriptionSheet.buttons[0] performClick:nil];
+        pumpUntil(^BOOL { return [controller valueForKey:@"localPreparation"]==nil && enqueueCalled; });
+        NSCAssert([enqueuedModel isEqual:@"nemotron-3.5-q8"],@"8-bit choice reaches the background enqueue");
+        [controller configureLocalModels:NULL fixture:[NSData dataWithBytes:&catalog length:sizeof(catalog)] languageMenu:languageMenu manageModels:nil];
+        enqueueCalled=NO; enqueueFailure=1;
+        [findButton([controller valueForKey:@"detail"],@"Transcribe again…") performClick:nil];
+        transcriptionSheet=[controller valueForKey:@"transcriptionSheet"]; [transcriptionSheet.buttons[0] performClick:nil];
+        pumpUntil(^BOOL { return [controller valueForKey:@"localPreparation"]==nil && enqueueCalled; });
+        NSCAssert(containsText([controller valueForKey:@"detail"],@"Restore the original audio") && findButton([controller valueForKey:@"detail"],@"Generate / retry recap").enabled,@"Local errors are actionable and do not occupy the recap request");
+        enqueueFailure=0;
+        ascolto_local_models_snapshot_t unavailable={0};
+        [controller configureLocalModels:NULL fixture:[NSData dataWithBytes:&unavailable length:sizeof(unavailable)] languageMenu:languageMenu manageModels:nil];
+        [findButton([controller valueForKey:@"detail"],@"Transcribe again…") performClick:nil];
+        transcriptionSheet=[controller valueForKey:@"transcriptionSheet"];
+        NSCAssert(!transcriptionSheet.buttons[0].enabled && containsText(transcriptionSheet.accessoryView,@"No installed model is ready"),@"The sheet explains an unavailable installed catalog and blocks enqueue");
+        [transcriptionSheet.buttons[1] performClick:nil];
+        pumpUntil(^BOOL { return [controller valueForKey:@"transcriptionSheet"]==nil; });
+        [host showActivity];
+        [findButton([controller valueForKey:@"detail"],@"Transcribe again…") performClick:nil];
+        transcriptionSheet=[controller valueForKey:@"transcriptionSheet"];
+        [transcriptionSheet.buttons[2] performClick:nil];
+        pumpUntil(^BOOL { return [[host valueForKey:@"category"] isEqual:@"Transcription"]; });
+        NSCAssert([[host valueForKey:@"transcriptionTab"] integerValue]==0 && host.window==originalWindow,@"Manage models selects On device in the same settings window");
+        [host showActivity];
         NSSegmentedControl* tabs=[controller valueForKey:@"tabs"];
         for(NSString* appearance in @[NSAppearanceNameAqua,NSAppearanceNameDarkAqua]) {
             host.window.appearance=[NSAppearance appearanceNamed:appearance]; [host showActivity];
@@ -98,14 +199,14 @@ int main(int argc, const char** argv) {
         [host setValue:@{} forKey:@"settings"];
         [host setValue:@"Storage" forKey:@"category"]; [host showSettings];
         [host showActivity];
-        NSCAssert(host.window==originalWindow && NSApp.windows.count==originalWindowCount,@"Navigation must reuse the same top-level window");
+        NSCAssert(host.window==originalWindow && visibleTopLevelWindows()==originalWindowCount,@"Navigation must reuse the same top-level window");
         NSCAssert([[controller valueForKey:@"selectedID"] isEqual:@45],@"Navigation must preserve the selected call");
         NSCAssert([controller valueForKey:@"mutation"]==pending,@"Navigation must preserve the running request");
         [controller setValue:nil forKey:@"mutation"];
         filter.selectedSegment=1; [controller render];
         NSButton* preview=findButton([controller valueForKey:@"detail"],@"Copy diagnostics…"); [preview performClick:nil];
         NSCAssert(containsText([controller valueForKey:@"detail"],@"Review diagnostics before copying"),@"Diagnostic preview must be inline");
-        NSCAssert(NSApp.windows.count==originalWindowCount,@"Copy preview must not create a second window");
+        NSCAssert(visibleTopLevelWindows()==originalWindowCount,@"Copy preview must not create a second window");
         NSCAssert((host.window.styleMask & NSWindowStyleMaskResizable)!=0,@"The shared window must allow native resizing and zoom");
         NSCAssert((host.window.collectionBehavior & NSWindowCollectionBehaviorFullScreenPrimary)!=0,@"The shared window must support native full screen");
         NSCAssert([host.window standardWindowButton:NSWindowZoomButton].enabled,@"The native green window button must be enabled");
@@ -124,9 +225,16 @@ int main(int argc, const char** argv) {
         NSCAssert(host.window==originalWindow,@"Resize and navigation must retain the same window");
         [host.window resignKeyWindow];
         NSCAssert(NSApp.activationPolicy==NSApplicationActivationPolicyRegular,@"Switching to another window must not remove Ascolto from Command-Tab");
+        enqueueCalled=NO; enqueueWaitForCancel=YES;
+        [findButton([controller valueForKey:@"detail"],@"Transcribe again…") performClick:nil];
+        transcriptionSheet=[controller valueForKey:@"transcriptionSheet"];
+        [transcriptionSheet.buttons[0] performClick:nil];
+        pumpUntil(^BOOL { return enqueueCalled; });
         [host.window close];
+        pumpUntil(^BOOL { return [controller valueForKey:@"localPreparation"]==nil; });
+        NSCAssert(enqueueCancelled,@"Closing the window cooperatively cancels background audio preparation");
         NSCAssert(NSApp.activationPolicy==NSApplicationActivationPolicyAccessory,@"Closing the main window must restore menu-only operation");
-        puts("Activity diagnostics AppKit: PASS (empty/failure/filter/retry/history/running/cancel, native window activation, light/dark; no provider requests)");
+        puts("Activity diagnostics AppKit: PASS (empty/failure/filter/retry/history/running/cancel, retranscription queue/model/language/manage/close, native window activation, light/dark; no provider requests)");
     }
     return 0;
 }

@@ -4,4 +4,11 @@ static const artifact_t fixture_files[] = {{"model.bin", "https://huggingface.co
 #else
 static const artifact_t fixture_files[] = {{"model.bin", "file:///tmp/ascolto-local-stt-download-fixture.bin", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", 3}};
 #endif
-static const package_t packages[] = {{NULL,0},{fixture_files,1},{fixture_files,1},{fixture_files,1}};
+static const artifact_t nemotron_fixture_files[] = {
+    {"decoder.gguf", "file:///tmp/ascolto-local-stt-download-fixture.bin", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", 3},
+    {"encoder.gguf", "file:///tmp/ascolto-local-stt-download-fixture.bin", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", 3}
+};
+static const artifact_t preparation_input[] = {
+    {"model.safetensors", "file:///tmp/ascolto-local-stt-download-fixture.bin", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", 3}
+};
+static const package_t packages[] = {{NULL,0,NULL,0,0},{fixture_files,1,NULL,0,0},{fixture_files,1,NULL,0,0},{fixture_files,1,NULL,0,0},{nemotron_fixture_files,2,NULL,0,0},{preparation_input,1,nemotron_fixture_files,2,6}};

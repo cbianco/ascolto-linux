@@ -156,3 +156,28 @@ CREATE TRIGGER job_queued_event AFTER INSERT ON recap_jobs BEGIN
  INSERT INTO job_events(job_id,status,at_ms) VALUES(NEW.id,NEW.status,NEW.queued_at_ms); END;
 CREATE TRIGGER job_state_event AFTER UPDATE OF status ON recap_jobs BEGIN
  INSERT INTO job_events(job_id,status,at_ms,error_code) VALUES(NEW.id,NEW.status,max(NEW.queued_at_ms,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)),NEW.error_code); END;
+
+-- Native deferred transcription schema version 2. Keep this marker for migration.
+CREATE TABLE native_transcription_jobs(
+ id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
+ state TEXT NOT NULL CHECK(state IN ('recording','queued','running','completed','failed','cancelled')),
+ model_id TEXT NOT NULL CHECK(length(model_id)>0), language TEXT NOT NULL, keywords TEXT NOT NULL,
+ diarizer_threshold REAL NOT NULL CHECK(diarizer_threshold>=0 AND diarizer_threshold<=1),
+ mic_path TEXT NOT NULL CHECK(substr(mic_path,1,1)='/'), sys_path TEXT NOT NULL CHECK(substr(sys_path,1,1)='/'),
+ metadata_json TEXT NOT NULL DEFAULT '{}', sample_count INTEGER NOT NULL DEFAULT 0 CHECK(typeof(sample_count)='integer' AND sample_count>=0),
+ completed_segments INTEGER NOT NULL DEFAULT 0 CHECK(typeof(completed_segments)='integer' AND completed_segments>=0),
+ processed_frames INTEGER NOT NULL DEFAULT 0 CHECK(typeof(processed_frames)='integer' AND processed_frames>=0),
+ cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0,1)), owner TEXT,
+ queued_at_ms INTEGER NOT NULL CHECK(queued_at_ms>=0), started_at_ms INTEGER, finished_at_ms INTEGER, error_code TEXT,
+ CHECK((state IN ('completed','failed','cancelled'))=(finished_at_ms IS NOT NULL)),
+ CHECK((state='running')=(owner IS NOT NULL)));
+CREATE INDEX native_transcription_queue ON native_transcription_jobs(state,id);
+CREATE TABLE native_transcription_segments(
+ job_id INTEGER NOT NULL REFERENCES native_transcription_jobs(id) ON DELETE CASCADE,
+ ordinal INTEGER NOT NULL CHECK(typeof(ordinal)='integer' AND ordinal>=0),
+ end_frame INTEGER NOT NULL CHECK(typeof(end_frame)='integer' AND end_frame>=0),
+ channel TEXT NOT NULL CHECK(channel IN ('MIC','SYS')),
+ start_ms INTEGER NOT NULL CHECK(typeof(start_ms)='integer' AND start_ms>=0),
+ end_ms INTEGER NOT NULL CHECK(typeof(end_ms)='integer' AND end_ms>=start_ms),
+ checkpoint_version INTEGER NOT NULL CHECK(checkpoint_version>0),
+ checkpoint BLOB NOT NULL CHECK(typeof(checkpoint)='blob'), PRIMARY KEY(job_id,ordinal));

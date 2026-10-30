@@ -42,6 +42,7 @@ int main(int argc, char **argv) {
                "  START | STOP | PAUSE | RESUME\n"
                "  SET_AUTO_MIC | SET_SAVE_AUDIO | SET_CLOUD_RECAP | SET_RECAP_TTS <on|off>\n"
                "  SET_LANG <auto|it|en|es|fr|de|nl|pl>\n"
+               "  LOCAL_QUEUE_CANCEL | LOCAL_QUEUE_RETRY <job_id>\n"
                "  RECAP | MAKE_MP3 | PREPARE_RECAP [transcript.md]\n",
 #else
                "Commands:\n"

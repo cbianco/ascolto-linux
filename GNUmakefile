@@ -75,7 +75,7 @@ local-stt-deps:
 WITH_LOCAL_STT ?= 1
 ifeq ($(WITH_LOCAL_STT),1)
 deps: build/local-stt/.ready
-build/local-stt/.ready: src/local_stt_manifest.inc scripts/generate_local_stt_manifest.py scripts/build_local_stt.sh src/local_stt/CMakeLists.txt src/local_stt/whisper.c src/local_stt/parakeet.cpp src/local_stt/qwen.c resources/local-stt-manifest.json
+build/local-stt/.ready: src/local_stt_manifest.inc scripts/generate_local_stt_manifest.py scripts/build_local_stt.sh src/local_stt/CMakeLists.txt src/local_stt/whisper.c src/local_stt/parakeet.cpp src/local_stt/qwen.c src/local_stt/nemotron.cpp src/local_stt/expert_cache.c src/local_stt/expert_cache.h src/local_stt/streamed_moe.cpp src/local_stt/streamed_moe.h src/local_stt/prepare_bf16.cpp src/local_stt/prepare_bf16.h scripts/build_nemotron_stt.sh scripts/prepare_nemotron_runtime.py scripts/patch_nemotron_prefill.py scripts/patch_nemotron_ssd.py resources/local-stt-manifest.json $(wildcard resources/nemotron-bf16-preparation/*)
 	sh scripts/build_local_stt.sh
 	@touch $@
 ifeq ($(ASCOLTO_PLATFORM),Darwin)
@@ -99,11 +99,40 @@ test-local-stt:
 	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Iinclude $(STT_TEST_SHARED) tests/local_stt_adapter.c -o build/local-stt-tests/local-stt/whisper-turbo-q5.$(STT_TEST_SUFFIX)
 	@cp build/local-stt-tests/local-stt/whisper-turbo-q5.$(STT_TEST_SUFFIX) build/local-stt-tests/local-stt/parakeet-v3-q8.$(STT_TEST_SUFFIX)
 	@cp build/local-stt-tests/local-stt/whisper-turbo-q5.$(STT_TEST_SUFFIX) build/local-stt-tests/local-stt/qwen3-asr-1.7b.$(STT_TEST_SUFFIX)
+	@cp build/local-stt-tests/local-stt/whisper-turbo-q5.$(STT_TEST_SUFFIX) build/local-stt-tests/local-stt/nemotron-3.5-q8.$(STT_TEST_SUFFIX)
+	@cp build/local-stt-tests/local-stt/whisper-turbo-q5.$(STT_TEST_SUFFIX) build/local-stt-tests/local-stt/nemotron-3.5-bf16-ssd.$(STT_TEST_SUFFIX)
 	$(CC) -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 -DASCOLTO_LOCAL_STT_TEST_MANIFEST -Iinclude src/local_stt.c src/database.c src/storage.c src/filesystem.c src/ai_settings.c tests/local_stt_main.c $(STT_TEST_LINK) -o build/local-stt-tests/test
 	./build/local-stt-tests/test
+	$(CC) -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O2 -DASCOLTO_LOCAL_STT_TEST_MANIFEST -DASCOLTO_LOCAL_STT_TEST_VERIFICATION_GATE -Iinclude src/local_stt.c src/database.c src/storage.c src/filesystem.c src/ai_settings.c tests/local_stt_preparation.c $(STT_TEST_LINK) -o build/local-stt-tests/preparation-test
+	./build/local-stt-tests/preparation-test
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -DASCOLTO_STT_TEST_NO_PREPARE -Iinclude $(STT_TEST_SHARED) tests/local_stt_adapter.c -o build/local-stt-tests/local-stt/nemotron-3.5-bf16-ssd.$(STT_TEST_SUFFIX)
+	./build/local-stt-tests/preparation-test missing-symbol
+	@cp build/local-stt-tests/local-stt/whisper-turbo-q5.$(STT_TEST_SUFFIX) build/local-stt-tests/local-stt/nemotron-3.5-bf16-ssd.$(STT_TEST_SUFFIX)
 
 # Explicit network check downloads only one pinned 6 KB public configuration file.
 .PHONY: test-local-stt-download
 test-local-stt-download: test-local-stt
 	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -DASCOLTO_LOCAL_STT_TEST_MANIFEST -DASCOLTO_LOCAL_STT_TEST_HTTPS -Iinclude src/local_stt.c src/database.c src/storage.c src/filesystem.c src/ai_settings.c tests/local_stt_download.c $(STT_TEST_LINK) -o build/local-stt-tests/download
 	./build/local-stt-tests/download
+
+.PHONY: test-nemotron-native
+test-nemotron-native:
+	@mkdir -p build/local-stt-tests
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Iinclude tests/nemotron_runtime_smoke.c $(STT_TEST_LINK) -o build/local-stt-tests/nemotron-smoke
+	./build/local-stt-tests/nemotron-smoke ./bin/local-stt/nemotron-3.5-q8.$(STT_TEST_SUFFIX)
+	./build/local-stt-tests/nemotron-smoke ./bin/local-stt/nemotron-3.5-bf16-ssd.$(STT_TEST_SUFFIX)
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Iinclude tests/nemotron_prepare_abi.c $(STT_TEST_LINK) -o build/local-stt-tests/nemotron-prepare-abi
+	./build/local-stt-tests/nemotron-prepare-abi ./bin/local-stt/nemotron-3.5-bf16-ssd.$(STT_TEST_SUFFIX)
+
+.PHONY: test-nemotron-ssd
+test-nemotron-ssd:
+	cmake --build build/local-stt/nemotron --target ascolto-nemotron-moe-test ascolto-nemotron-streamed-graph ascolto-nemotron-reference-conv ascolto-nemotron-prepare -j 4
+	./build/local-stt/nemotron/bin/ascolto-nemotron-moe-test
+	./build/local-stt/nemotron/bin/ascolto-nemotron-streamed-graph
+	./build/local-stt/nemotron/bin/ascolto-nemotron-streamed-graph cpu-q8
+	./build/local-stt/nemotron/bin/ascolto-nemotron-streamed-graph cpu-wide-q8
+	./build/local-stt/nemotron/bin/ascolto-nemotron-reference-conv
+	python3 tests/test_nemotron_prepare.py build/local-stt/nemotron/bin/ascolto-nemotron-prepare
+	python3 -m unittest discover -s tests -p test_nemotron_prefill.py
+	python3 -m unittest discover -s tests -p test_nemotron_eval.py
+	python3 -m unittest discover -s tests -p test_nemotron_queue_replay.py

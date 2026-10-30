@@ -317,25 +317,50 @@ static void settings_comparison(void *widget, gpointer data) {
     (void)widget; ascolto_tray_ui_t *ui=data; gtk_tray_priv_t *p=ui->gtk_impl;
     g_free(p->ai_message);p->ai_message=g_strdup("Small Italian sample against an automatic cloud reference, not human ground truth or certified accuracy. Whisper shares the reference model family. Delay, recognition agreement and memory are separate measurements. Parakeet detects language automatically; language and keyword support depend on the engine."); settings_build(ui);
 }
+static void settings_render_local_models(ascolto_tray_ui_t *ui);
+static void settings_nemotron_precision(void *widget, gpointer data) {
+    ascolto_tray_ui_t *ui=data; gtk_tray_priv_t *p=ui->gtk_impl;
+    const char *id=s_gtk_combo_box_get_active_id(widget);
+    int bits=ascolto_nemotron_bits(id);
+    if(bits) {
+        p->nemotron_bits=bits;
+        /* Refresh on the next UI iteration, after GTK finishes emitting changed. */
+        p->local_revision=UINT64_MAX;
+    }
+}
 static void settings_render_local_models(ascolto_tray_ui_t *ui) {
     gtk_tray_priv_t *p=ui->gtk_impl;if(!p->local_models_box)return;
+    g_object_set_data(G_OBJECT(p->local_models_box),"nemotron-precision",NULL);
     GList *children=s_gtk_container_get_children(p->local_models_box);
     for(GList *it=children;it;it=it->next)p->gtk_widget_destroy(it->data);g_list_free(children);
     ascolto_local_models_snapshot_t snapshot;ascolto_local_models_snapshot(ui->core->local_models,&snapshot);p->local_revision=snapshot.revision;p->local_action_pending=!!g_atomic_int_get(&p->action_pending);
     const char *selected=snapshot.selected,*active=snapshot.active;
-    for(int i=0;i<4;i++){if(!strcmp(snapshot.models[i].id,snapshot.selected))selected=snapshot.models[i].name;if(!strcmp(snapshot.models[i].id,snapshot.active))active=snapshot.models[i].name;}
+    for(int i=0;i<ASCOLTO_LOCAL_MODEL_COUNT;i++){if(!strcmp(snapshot.models[i].id,snapshot.selected))selected=snapshot.models[i].name;if(!strcmp(snapshot.models[i].id,snapshot.active))active=snapshot.models[i].name;}
     gchar *status=snapshot.active[0]?g_strdup_printf("Recording with %s · Next session: %s",active,selected):g_strdup_printf("Next session: %s · %.2f GB available",selected,snapshot.available_bytes/1e9);
     settings_label(p,p->local_models_box,snapshot.error[0]?snapshot.error:status);g_free(status);
-    for(int i=0;i<4;i++){
+    if(!p->nemotron_bits) { p->nemotron_bits=ascolto_nemotron_bits(snapshot.selected); if(!p->nemotron_bits)p->nemotron_bits=8; }
+    for(int i=0;i<ASCOLTO_LOCAL_MODEL_COUNT;i++){
         ascolto_model_snapshot_t *model=&snapshot.models[i];if(!model->id[0])continue;
+        int bits=ascolto_nemotron_bits(model->id);if(bits&&bits!=p->nemotron_bits)continue;
         void *row=s_gtk_box_new(0,12);s_gtk_box_pack_start(p->local_models_box,row,FALSE,FALSE,6);
         void *copy=s_gtk_box_new(1,2);s_gtk_box_pack_start(row,copy,TRUE,TRUE,0);
-        void *title=settings_label(p,copy,model->name);gchar *escaped=g_markup_escape_text(model->name,-1);gchar *bold=g_strdup_printf("<b>%s</b>",escaped);s_gtk_label_set_markup(title,bold);g_free(escaped);g_free(bold);
+        const char *name=bits?"Nemotron 3.5 Transcribe":model->name;
+        void *title=settings_label(p,copy,name);gchar *escaped=g_markup_escape_text(name,-1);gchar *bold=g_strdup_printf("<b>%s</b>",escaped);s_gtk_label_set_markup(title,bold);g_free(escaped);g_free(bold);
+        if(bits){
+            void *precision=s_gtk_combo_box_text_new();
+            g_object_set_data(G_OBJECT(p->local_models_box),"nemotron-precision",precision);
+            const int choices[]={8,16};const char *labels[]={"8 bit · Q8_0","16 bit · BF16 SSD"};
+            for(int n=0;n<2;n++)s_gtk_combo_box_text_append(precision,ascolto_nemotron_id(choices[n]),labels[n]);
+            s_gtk_combo_box_set_active_id(precision,model->id);
+            s_atk_object_set_name(s_gtk_widget_get_accessible(precision),"Nemotron weight precision");
+            s_gtk_box_pack_start(copy,precision,FALSE,FALSE,0);
+            g_signal_connect_data(precision,"changed",G_CALLBACK(settings_nemotron_precision),ui,NULL,0);
+        }
         settings_label(p,copy,model->description);
         gchar *detail;
         if(model->state==ASCOLTO_MODEL_DOWNLOADING)detail=g_strdup_printf("Downloading %.1f / %.1f MB",model->transferred/1e6,model->bytes/1e6);
         else if(model->state==ASCOLTO_MODEL_CHECKING)detail=g_strdup("Checking model files…");
-        else if(model->state==ASCOLTO_MODEL_VERIFYING)detail=g_strdup("Verifying download…");
+        else if(model->state==ASCOLTO_MODEL_VERIFYING)detail=g_strdup(model->message[0]?model->message:"Verifying download…");
         else if(i==0)detail=g_strdup_printf("%sDefault · included · 17 MB",model->selected?"Selected · ":"");
         else detail=g_strdup_printf("%s%s · %s · %.1f MB download",model->selected?"Selected · ":"",model->message,model->hint,model->bytes/1e6);
         if(i==2&&model->selected){gchar *extended=g_strconcat(detail," · Automatic language; keyword prompts unavailable",NULL);g_free(detail);detail=extended;}

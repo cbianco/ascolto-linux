@@ -10,7 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from ai_workflows import WorkflowError
 from ascolto_diagnostics import cancel_job, snapshot
-from ascolto_runtime import archive_status, handle_request, reconcile_jobs
+from ascolto_runtime import archive_status, handle_request, reconcile_jobs, _session
 from ascolto_job_diagnostics import JobDiagnostics, DiagnosticStorageError, read_diagnostics, diagnostic_path
 from ascolto_database import Database
 import test_integration as fixtures
@@ -29,6 +29,117 @@ class DiagnosticsTests(unittest.TestCase):
             if state != 'running':
                 db.update_job(job,state,error_code=code)
             return job
+
+    def native_version(self, db, original, state='queued', model='fixture/local', child=True):
+        if child:
+            metadata = json.dumps({'native_transcription_source_session': original, 'local_model': model,
+                                   'language': 'it', 'retranscription': True, 'post_call': True,
+                                   'retain_audio': False, 'cloud_recap': False, 'recap_tts': False})
+            started = db.connection.execute('SELECT started_at_ms FROM sessions WHERE id=?', (original,)).fetchone()[0]
+            sid = db.connection.execute("INSERT INTO sessions(started_at_ms,state,capture_backend,metadata_json) VALUES(?,'completed','coreaudio',?)", (started, metadata)).lastrowid
+        else:
+            sid = original
+        owner = 'fixture-worker' if state == 'running' else None
+        finished = 9999999999999 if state in ('failed', 'cancelled', 'completed') else None
+        job = db.connection.execute("""INSERT INTO native_transcription_jobs(
+            session_id,state,model_id,language,keywords,diarizer_threshold,mic_path,sys_path,
+            sample_count,processed_frames,queued_at_ms,finished_at_ms,owner,error_code)
+            VALUES(?,?,?,'it','',0.5,?,?,16000,8000,9999999999998,?,?,?)""",
+            (sid, state, model, str(self.folder/f'{sid}-mic.pcm'), str(self.folder/f'{sid}-sys.pcm'),
+             finished, owner, 'fixture_failed' if state == 'failed' else None)).lastrowid
+        if state == 'completed':
+            folder = self.folder/'Data'/'Local-transcription-history'/f'version-{sid}'
+            folder.mkdir(parents=True)
+            db.queue_export(sid)
+            db.publish_exports(sid, folder/'transcript.md', folder/'transcript.jsonl')
+        return sid, job
+
+    def test_local_versions_group_under_original_without_reading_or_mutating_content(self):
+        original = self.session(audio=True)
+        with self.manager.database() as db:
+            db.connection.execute("UPDATE sessions SET metadata_json=? WHERE id=?",
+                                  (json.dumps({'local_model': 'fixture/original', 'window_title': 'private title'}), original))
+            before = dict(db.connection.execute('SELECT * FROM sessions WHERE id=?', (original,)).fetchone())
+            artifacts = [tuple(row) for row in db.connection.execute('SELECT * FROM artifacts WHERE session_id=?', (original,))]
+            version, job = self.native_version(db, original, 'completed')
+            with patch.object(Path, 'read_text', side_effect=AssertionError('No text reads')):
+                with patch.object(Path, 'read_bytes', side_effect=AssertionError('No audio reads')):
+                    result = snapshot(db, self.config)
+            self.assertEqual(dict(db.connection.execute('SELECT * FROM sessions WHERE id=?', (original,)).fetchone()), before)
+            self.assertEqual([tuple(row) for row in db.connection.execute('SELECT * FROM artifacts WHERE session_id=?', (original,))], artifacts)
+        self.assertEqual(result['summary']['total_calls'], 1)
+        call = result['calls'][0]
+        self.assertEqual(call['id'], original)
+        local = call['local_transcription']
+        self.assertTrue(local['can_retranscribe'])
+        self.assertEqual([v['session_id'] for v in local['versions']], [original, version])
+        self.assertEqual(local['versions'][0]['model_id'], 'fixture/original')
+        self.assertEqual(local['versions'][0]['language'], 'en')
+        self.assertEqual(local['versions'][1]['job_id'], job)
+        self.assertEqual(local['versions'][1]['progress'], 0.5)
+        self.assertIn('Local-transcription-history', local['versions'][1]['path'])
+        self.assertNotIn('private title', json.dumps(result))
+        self.assertNotIn('The supported source statement.', json.dumps(result))
+        self.assertNotIn(str(self.folder), call['safe_report'])
+
+    def test_local_version_states_expose_native_controls_and_keep_failures(self):
+        original = self.session(audio=True)
+        with self.manager.database() as db:
+            queued, queued_job = self.native_version(db, original, 'queued')
+            running, running_job = self.native_version(db, original, 'running')
+            failed, failed_job = self.native_version(db, original, 'failed')
+            cancelled, cancelled_job = self.native_version(db, original, 'cancelled')
+            db.connection.execute('UPDATE native_transcription_jobs SET cancel_requested=1 WHERE id=?', (running_job,))
+            call = snapshot(db, self.config)['calls'][0]
+        versions = {v['session_id']: v for v in call['local_transcription']['versions']}
+        self.assertTrue(versions[queued]['can_cancel'])
+        self.assertFalse(versions[running]['can_cancel'])
+        self.assertTrue(versions[running]['cancel_requested'])
+        self.assertTrue(versions[failed]['can_retry'])
+        self.assertTrue(versions[cancelled]['can_retry'])
+        self.assertEqual(versions[failed]['error_code'], 'fixture_failed')
+        self.assertEqual(call['status'], 'running')
+        self.assertEqual(len(versions), 5)
+
+    def test_local_retranscription_requires_ready_readable_audio_and_terminal_original(self):
+        original = self.session(audio=True)
+        with self.manager.database() as db:
+            self.assertTrue(snapshot(db, self.config)['calls'][0]['local_transcription']['can_retranscribe'])
+            db.connection.execute("UPDATE sessions SET state='recording' WHERE id=?", (original,))
+            self.assertFalse(snapshot(db, self.config)['calls'][0]['local_transcription']['can_retranscribe'])
+            db.connection.execute("UPDATE sessions SET state='completed' WHERE id=?", (original,))
+            self.native_version(db, original, 'queued', child=False)
+            self.assertIn('original local transcription', snapshot(db, self.config)['calls'][0]['local_transcription']['reason'])
+            db.connection.execute("UPDATE native_transcription_jobs SET state='failed',finished_at_ms=1 WHERE session_id=?", (original,))
+            for value in ('pending', 'failed'):
+                db.connection.execute("UPDATE artifacts SET state=? WHERE session_id=? AND kind='audio_m4a'", (value, original))
+                self.assertFalse(snapshot(db, self.config)['calls'][0]['local_transcription']['can_retranscribe'])
+            db.connection.execute("UPDATE artifacts SET state='ready' WHERE session_id=? AND kind='audio_m4a'", (original,))
+            (self.folder/'call.wav').chmod(0)
+            self.assertFalse(snapshot(db, self.config)['calls'][0]['local_transcription']['can_retranscribe'])
+            (self.folder/'call.wav').chmod(0o600)
+            (self.folder/'call.wav').unlink()
+            self.assertFalse(snapshot(db, self.config)['calls'][0]['local_transcription']['can_retranscribe'])
+
+    def test_missing_historical_model_and_language_remain_unknown(self):
+        original = self.session()
+        with self.manager.database() as db:
+            db.connection.execute('UPDATE utterances SET language=NULL WHERE session_id=?', (original,))
+            local = snapshot(db, self.config)['calls'][0]['local_transcription']
+        self.assertEqual(local['versions'][0]['model_id'], 'Unknown')
+        self.assertEqual(local['language'], 'Unknown')
+        self.assertFalse(local['can_retranscribe'])
+
+    def test_implicit_archive_and_ai_selection_ignore_local_version_sessions(self):
+        original = self.session(audio=True)
+        with self.manager.database() as db:
+            child, _ = self.native_version(db, original, 'completed')
+            self.assertEqual(_session(db), original)
+            self.assertEqual(Path(archive_status(db)['transcript']), (self.folder/'call.md').resolve())
+            self.assertEqual(_session(db, session_id=child), child)
+        result = handle_request(self.manager, {'action': 'recap'})
+        with self.manager.database() as db:
+            self.assertEqual(db.connection.execute('SELECT session_id FROM recap_jobs WHERE id=?', (result['job_id'],)).fetchone()[0], original)
 
     def test_failed_recap_explains_preserved_transcript_without_content(self):
         session = self.session()

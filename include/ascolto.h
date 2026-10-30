@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include "ascolto/storage.h"
 #include "ascolto/local_stt.h"
+#include "ascolto/deferred.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -231,6 +232,8 @@ typedef struct {
     ascolto_config_t config;
     ascolto_app_state_t state;
     bool sys_audio_permission_ok;
+    bool mic_hardware_active;
+    bool transcription_error;
     float last_mic_rms_db;
     float last_sys_rms_db;
     char active_mic_name[128];
@@ -246,6 +249,8 @@ typedef struct {
     int remote_speakers;
     double session_start_s;
     int64_t mic_samples;
+    int64_t sys_samples;
+    int64_t capture_dropped_samples;
     int64_t mic_padding;
 } ascolto_live_snapshot_t;
 
@@ -254,6 +259,9 @@ typedef struct {
     bool save_audio;
     bool meta_written;
     int64_t database_session;
+    int64_t deferred_job;
+    int64_t synced_samples[2];
+    bool retain_audio;
     ascolto_storage_writer_t storage_writer;
     int storage_error;
     char md_path[512];
@@ -268,7 +276,7 @@ typedef struct {
 } ascolto_transcript_files_t;
 
 /* Live Application Controller state shared between CoreAudio, Worker, and Menu Bar UI */
-typedef struct {
+typedef struct ascolto_live_app_s {
     pthread_mutex_t lock;
     pthread_cond_t session_cond;
     pthread_mutex_t snapshot_lock;
@@ -280,6 +288,8 @@ typedef struct {
     ascolto_whistle_t* whistle;
     ascolto_local_models_t* local_models;
     ascolto_local_stt_t local_stt;
+    ascolto_deferred_worker_t *deferred_worker;
+    struct ascolto_deferred_replay_state *deferred_replay;
     bool transcription_error;
     ascolto_diarizer_t diarizer;
     ascolto_online_vad_t vad_mic;

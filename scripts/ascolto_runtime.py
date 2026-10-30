@@ -23,11 +23,11 @@ def session_directory(db, session):
 
 def archive_status(db):
     result = {'directory': db.settings()['output_dir']}
-    row = db.connection.execute("SELECT session_id,path FROM artifacts WHERE kind='transcript_md' AND state='ready' ORDER BY (SELECT started_at_ms FROM sessions WHERE id=session_id) DESC,session_id DESC LIMIT 1").fetchone()
+    row = db.connection.execute("SELECT a.session_id,a.path FROM artifacts a JOIN sessions s ON s.id=a.session_id WHERE a.kind='transcript_md' AND a.state='ready' AND CASE WHEN json_valid(s.metadata_json) THEN json_extract(s.metadata_json,'$.native_transcription_source_session') END IS NULL ORDER BY s.started_at_ms DESC,s.id DESC,a.id DESC LIMIT 1").fetchone()
     if row:
         result.update(transcript=row['path'], call_directory=str(session_directory(db, row['session_id'])))
     # A newer empty call must not hide the most recent readable final recap.
-    for recap in db.connection.execute("SELECT a.path FROM artifacts a JOIN recap_jobs j ON a.recap_job_id=j.id JOIN sessions s ON s.id=a.session_id WHERE a.kind='recap_md' AND a.state='ready' AND j.status='completed' AND j.phase='final' ORDER BY s.started_at_ms DESC,j.id DESC,a.id DESC"):
+    for recap in db.connection.execute("SELECT a.path FROM artifacts a JOIN recap_jobs j ON a.recap_job_id=j.id JOIN sessions s ON s.id=a.session_id WHERE a.kind='recap_md' AND a.state='ready' AND j.status='completed' AND j.phase='final' AND CASE WHEN json_valid(s.metadata_json) THEN json_extract(s.metadata_json,'$.native_transcription_source_session') END IS NULL ORDER BY s.started_at_ms DESC,j.id DESC,a.id DESC"):
         if Path(recap[0]).is_file():
             result['recap'] = recap[0]
             break
@@ -99,7 +99,7 @@ def _session(db, transcript=None, session_id=None):
     elif transcript:
         row = db.connection.execute('SELECT session_id FROM artifacts WHERE path=?', (str(Path(transcript).resolve()),)).fetchone()
     else:
-        row = db.connection.execute("SELECT id FROM sessions WHERE state IN ('recording','paused','completed') ORDER BY started_at_ms DESC,id DESC LIMIT 1").fetchone()
+        row = db.connection.execute("SELECT id FROM sessions WHERE state IN ('recording','paused','completed') AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json,'$.native_transcription_source_session') END IS NULL ORDER BY started_at_ms DESC,id DESC LIMIT 1").fetchone()
     if not row:
         raise DatabaseError('No persisted session is available for this task')
     return row[0]

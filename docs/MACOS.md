@@ -5,6 +5,12 @@ behavior at its native boundary; see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Capture and archives
 
+Production capture records paired raw PCM without loading or invoking a speech
+model. A separate persistent worker transcribes after the call and pauses between
+segments when another call starts. See [post-call transcription](design/post-call-transcription.md).
+Temporary audio is mandatory until successful transcription; `save_audio` controls
+retention of the compressed final archive. Failed/cancelled jobs retain sources.
+
 1. **Never use `ScreenCaptureKit` for `SYS` audio**: it triggers the macOS purple screen-sharing menu bar indicator and spawns `replayd`. Always use CoreAudio `CATapDescription` + `AudioHardwareCreateProcessTap`.
 2. **Call start/end detection**: do not rely on `kAudioDevicePropertyDeviceIsRunningSomewhere` while `Ascolto` is recording (it stays `true` because `Ascolto` itself holds the mic open). Always use `ascolto_macos_query_audio_apps()`, which checks `kAudioProcessPropertyIsRunningInput` excluding `getpid()` and system daemons (`CoreSpeech`, `replayd`, `audiomxd`, `controlcenter`).
 3. **Speaker Bleed Gate (`SYS -> MIC`)**: on a MacBook without headphones, built-in speaker audio couples into the built-in mic at up to `sys_rms_db + 1 dB`, whereas user speech at desk distance is `-25` to `-35 dB`. Only gate `MIC` while `SYS` is actively speaking (`< 250ms`) and `mic_db < sys_db + 3.5 dB`; when `SYS` is silent, keep `MIC` VAD threshold at `-35.5 dB`.

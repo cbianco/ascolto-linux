@@ -90,7 +90,8 @@ utterance/sample counters.
 ## AI metadata and jobs
 
 AI connection/catalog/preference/job mutations have one implementation in Python;
-the native database API contains only recording, settings and export operations.
+the native database API owns recording, settings, export operations and the separate
+native deferred-transcription queue described below.
 `ProviderManager.load/save` uses SQLite under its existing process lock. It
 roundtrips account/client/subject/workspace identities, welcome flags, catalog
 order, model route metadata and each profile's model choice. Secrets remain in
@@ -137,6 +138,41 @@ halves of nullable selections. API-key identity is unique by provider/profile;
 OAuth identity by provider/profile/subject/normalized workspace, allowing distinct
 workspace registrations for the same person.
 
+## Native deferred transcription
+
+`native_transcription_jobs` is independent of Python provider jobs. Recording-first
+native sessions register their immutable model, language, keywords, diarization
+threshold, absolute MIC/SYS PCM paths and archive preferences before capture. The
+capture consumer writes both original channels; sealing records their delivered
+sample count and changes `recording` to `queued` only after audio is durable.
+An audio write or fsync failure marks the recording job failed. PCM remains on
+disk; SQLite never stores audio samples or deletes these source files.
+
+One native worker holds an owner-only nonblocking flock beside the database.
+After acquiring this lock, it requeues interrupted running jobs and recovers
+interrupted recordings from their source files. Other handles can request
+cancellation or retry; a failed/cancelled retry retains completed segment results.
+`processed_frames` and segment `end_frame` count PCM samples per channel, rather
+than 20 ms processing blocks. Job state and copied progress snapshots are read
+away from the main UI thread.
+
+The worker deterministically replays PCM from the start to rebuild VAD, echo and
+speaker state. Each completed segment has a contiguous ordinal and a versioned
+opaque checkpoint blob. The worker validates checkpoint version, size and source
+identity before reusing cached recognition. Accepted utterances, the segment
+checkpoint and the export-outbox request commit in one transaction. Repeated
+identical checkpoints are no-ops, preventing duplicate utterances after a crash.
+Rejected segments also retain checkpoints. A crash after recognition but before
+commit may rerun that incomplete segment. Terminal errors store only bounded
+ASCII error codes. The dedicated table does not enable cloud audio uploads.
+
+Schema version 2 adds these native tables without rewriting existing rows. Native
+and Python openers first take a private SQLite backup, including committed WAL
+pages, then apply the ordered migration in a transaction. The version-one backup
+remains a standalone SQLite file beside the database. Concurrent openers recheck
+the version after obtaining the write transaction; completed migration is not
+repeated.
+
 ## Legacy adoption
 
 Bootstrap scans only native session names in the configured archive root, without
@@ -173,9 +209,9 @@ without exact end time can remain completed with `ended_at_ms=NULL`; no timestam
 is invented from the final turn or file modification time. Missing closing
 markers indicate failed/interrupted sessions.
 
-A newer, unrelated or corrupt database fails without reset. Schema version 1 has
-no destructive downgrade; future migrations must first use SQLite's backup API,
-then run ordered migration transactions.
+A newer, unrelated or corrupt database fails without reset. There is no destructive
+downgrade; migrations first use SQLite's backup API, then run ordered migration
+transactions.
 
 ## Verification
 
@@ -199,3 +235,19 @@ JSONL retains its fields and citation identity; only known path values relocate.
 Session, utterance and job IDs remain unchanged. A copy/transaction failure retains
 original references and originals. No inference or credential access is involved.
 New-layout transcript imports are supported alongside both older native layouts.
+
+### Local transcript versions
+
+A requested historical re-transcription owns a new internal session and native
+job, committed together after the private decoded PCM is durable. Their
+`metadata_json.native_transcription_source_session` links to the original call;
+no existing session, utterance, artifact or citation ID is replaced. The child
+session retains the original call timestamps, while the job's queue timestamp
+records when the new version was requested. Each version uses its own transcript
+artifacts, speaker rows and export outbox.
+
+Activity groups child sessions under their source call, and all implicit
+latest-call/archive selectors exclude children. No additional schema migration
+is required. Explicit re-transcription never automatically launches recap or cloud
+work. Future session deletion or archive-moving operations must account for this
+metadata relationship and for native jobs' frozen PCM paths.

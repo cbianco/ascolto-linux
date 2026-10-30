@@ -9,6 +9,7 @@
 #import "macos/activity.h"
 #import "macos/app_icon.h"
 #include "ascolto/ai_settings.h"
+#include "ascolto/deferred.h"
 
 static NSString* menu_text(const char* text) {
     return text ? ([NSString stringWithUTF8String:text] ?: @"") : @"";
@@ -166,35 +167,54 @@ static NSString* menu_text(const char* text) {
 
     ascolto_live_snapshot_t snapshot;
     ascolto_live_app_read_snapshot(_app, &snapshot);
+    ascolto_local_models_snapshot_t localModels = {0};
+    ascolto_local_models_snapshot(_app->local_models, &localModels);
+    const ascolto_model_snapshot_t *selectedModel = NULL;
+    for (int i = 0; i < ASCOLTO_LOCAL_MODEL_COUNT; ++i)
+        if (!strcmp(localModels.models[i].id, localModels.selected)) selectedModel = &localModels.models[i];
     ascolto_app_state_t st = snapshot.state;
-    BOOL pending = _sessionTransitionPending || st == ASCOLTO_STATE_STOPPING;
+    BOOL deferred = _app->deferred_worker != NULL;
+    ascolto_deferred_snapshot_t queue = {0};
+    ascolto_deferred_snapshot(_app->deferred_worker, &queue);
+    BOOL modelLoading = !deferred && localModels.loading[0] != 0;
+    BOOL modelChecking = !deferred && selectedModel && selectedModel->state == ASCOLTO_MODEL_CHECKING;
+    BOOL pending = _sessionTransitionPending || st == ASCOLTO_STATE_STOPPING || modelLoading;
     BOOL recording = st == ASCOLTO_STATE_RECORDING;
     NSString* heading = @"Ready for a call";
     NSString* subtitle = snapshot.config.auto_trigger_mic ? @"Automatic monitoring is on" : @"Start a session manually";
     if (st == ASCOLTO_STATE_PAUSED) {
         heading = @"Monitoring paused";
-        subtitle = @"Manual transcription is available";
+        subtitle = deferred ? @"Manual recording is available" : @"Manual transcription is available";
     }
     if (recording) {
-        heading = @"Recording";
+        heading = deferred ? @"Recording audio" : @"Recording";
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         double elapsed = (double)now.tv_sec + (double)now.tv_nsec / 1e9 - snapshot.session_start_s;
         unsigned long seconds = (unsigned long)MAX(0.0, elapsed);
-        subtitle = [NSString stringWithFormat:@"%02lu:%02lu · %d phrases · %d speakers",
-                    seconds / 60, seconds % 60, snapshot.utterances, snapshot.remote_speakers];
+        subtitle = deferred ? [NSString stringWithFormat:@"%02lu:%02lu · Transcript after the call", seconds / 60, seconds % 60] :
+            [NSString stringWithFormat:@"%02lu:%02lu · %d phrases · %d speakers",
+                seconds / 60, seconds % 60, snapshot.utterances, snapshot.remote_speakers];
     }
     if (pending) {
         if (_recordingTransitionPending || st == ASCOLTO_STATE_STOPPING) {
-            heading = st == ASCOLTO_STATE_STOPPING || recording ? @"Saving session…" : @"Starting transcription…";
-            subtitle = st == ASCOLTO_STATE_STOPPING || recording ? @"Finishing transcription and audio" : @"Waiting for permission or audio device";
+            heading = st == ASCOLTO_STATE_STOPPING || recording ? @"Saving session…" :
+                (deferred ? @"Starting recording…" : @"Starting transcription…");
+            subtitle = st == ASCOLTO_STATE_STOPPING || recording ?
+                (deferred ? @"Finishing audio for the transcription queue" : @"Finishing transcription and audio") :
+                @"Waiting for permission or audio device";
         } else {
             heading = @"Updating settings…";
         }
     }
-    ascolto_local_models_snapshot_t localModels;
-    ascolto_local_models_snapshot(_app->local_models, &localModels);
-    if (localModels.error[0] && !pending) {
+    if (modelLoading) {
+        heading = @"Starting transcription…";
+        subtitle = selectedModel ? menu_text(selectedModel->message) : @"Loading the selected model…";
+    } else if (modelChecking && st == ASCOLTO_STATE_IDLE) {
+        heading = @"Checking selected model…";
+        subtitle = @"Verifying downloaded files before transcription can start";
+    }
+    if (!deferred && localModels.error[0] && !pending && !modelChecking) {
         heading = @"Local transcription needs attention";
         subtitle = menu_text(localModels.error);
     }
@@ -203,7 +223,7 @@ static NSString* menu_text(const char* text) {
         subtitle = @"Previous settings kept. Review database permissions.";
     }
     if (snapshot.storage_error && !pending) {
-        heading = @"Transcript storage failed";
+        heading = deferred ? @"Recording storage failed" : @"Transcript storage failed";
         subtitle = @"Local files retained. Review storage before starting another call.";
     }
     NSMenuItem* header = [[NSMenuItem alloc] initWithTitle:heading action:nil keyEquivalent:@""];
@@ -276,7 +296,9 @@ static NSString* menu_text(const char* text) {
     [details addItem:permItem];
 
     NSString* prevStr = nil;
-    if (snapshot.last_speaker[0] != '\0') {
+    if (deferred) {
+        prevStr = @"Transcription: Runs locally after the call";
+    } else if (snapshot.last_speaker[0] != '\0') {
         prevStr = [NSString stringWithFormat:@"Latest phrase [%@]: %@", menu_text(snapshot.last_speaker), menu_text(snapshot.last_utterance_text)];
     } else {
         prevStr = [NSString stringWithFormat:@"Latest phrase: %@", menu_text(snapshot.last_utterance_text)];
@@ -291,22 +313,62 @@ static NSString* menu_text(const char* text) {
 
     /* 2. Manual Start / Stop & Auto-Trigger Toggles */
     if (st == ASCOLTO_STATE_RECORDING || st == ASCOLTO_STATE_STOPPING) {
-        NSMenuItem* stopItem = [self itemWithTitle:@"Stop transcription" action:@selector(onToggleRecording:) key:@"s"];
+        NSMenuItem* stopItem = [self itemWithTitle:deferred ? @"Stop recording" : @"Stop transcription" action:@selector(onToggleRecording:) key:@"s"];
         if (st == ASCOLTO_STATE_STOPPING) stopItem.title = @"Finishing session…";
         stopItem.attributedTitle = [[NSAttributedString alloc] initWithString:stopItem.title attributes:@{NSForegroundColorAttributeName: NSColor.systemRedColor}];
         stopItem.enabled = !_sessionTransitionPending && st != ASCOLTO_STATE_STOPPING;
         [_statusMenu addItem:stopItem];
     } else {
-        NSMenuItem* startItem = [self itemWithTitle:@"Start transcription" action:@selector(onToggleRecording:) key:@"r"];
-        if (_sessionTransitionPending) startItem.title = @"Starting transcription…";
-        startItem.enabled = !_sessionTransitionPending;
+        NSMenuItem* startItem = [self itemWithTitle:deferred ? @"Start recording" : @"Start transcription" action:@selector(onToggleRecording:) key:@"r"];
+        if (_sessionTransitionPending || modelLoading) startItem.title = deferred ? @"Starting recording…" : @"Starting transcription…";
+        else if (modelChecking) startItem.title = @"Checking selected model…";
+        startItem.enabled = !pending && !modelChecking;
         [_statusMenu addItem:startItem];
+    }
+
+    if (deferred) {
+        NSString* queueTitle = @"Local transcription: No pending calls";
+        if (!queue.available) queueTitle = @"Local transcription: Unavailable";
+        else if (queue.paused_for_capture) queueTitle = @"Local transcription: Waiting for recording to finish";
+        else if (queue.checking_model) queueTitle = @"Local transcription: Waiting for model";
+        else if (queue.processing) {
+            double percent = queue.total_frames > 0 ? 100.0 * queue.processed_frames / queue.total_frames : 0;
+            queueTitle = [NSString stringWithFormat:@"Local transcription: %.0f%%", MIN(100.0, MAX(0.0, percent))];
+        } else if (queue.queued_count > 0) queueTitle = @"Local transcription: Queued";
+        else if (queue.retry_job_id > 0) queueTitle = @"Local transcription: Needs attention";
+        NSMenuItem* queueRoot = [self itemWithTitle:queueTitle action:nil key:@""];
+        NSMenu* queueMenu = [[NSMenu alloc] initWithTitle:@"Local transcription"];
+        queueMenu.autoenablesItems = NO;
+        NSMenuItem* counts = [self itemWithTitle:[NSString stringWithFormat:@"%d queued · %d failed", queue.queued_count, queue.failed_count] action:nil key:@""];
+        counts.enabled = NO; [queueMenu addItem:counts];
+        if (queue.job_id > 0) {
+            NSString* jobTitle = [NSString stringWithFormat:@"Job %lld · %@", (long long)queue.job_id, menu_text(queue.model_id)];
+            NSMenuItem* job = [self itemWithTitle:jobTitle action:nil key:@""];
+            job.enabled = NO; [queueMenu addItem:job];
+        }
+        if (queue.error_code[0]) {
+            NSString* message = [menu_text(queue.error_code) stringByReplacingOccurrencesOfString:@"_" withString:@" "];
+            NSMenuItem* error = [self itemWithTitle:message action:nil key:@""];
+            error.enabled = NO; [queueMenu addItem:error];
+        }
+        [queueMenu addItem:[NSMenuItem separatorItem]];
+        NSMenuItem* cancel = [self itemWithTitle:@"Cancel local transcription" action:@selector(onCancelLocalTranscription:) key:@""];
+        cancel.representedObject = @(queue.cancel_job_id);
+        cancel.enabled = queue.available && queue.cancel_job_id > 0 && !_terminationPending;
+        [queueMenu addItem:cancel];
+        NSMenuItem* retry = [self itemWithTitle:@"Resume latest local transcription" action:@selector(onRetryLocalTranscription:) key:@""];
+        retry.representedObject = @(queue.retry_job_id);
+        retry.enabled = queue.available && queue.retry_job_id > 0 && !_terminationPending;
+        [queueMenu addItem:retry];
+        queueRoot.submenu = queueMenu;
+        [_statusMenu addItem:queueRoot];
     }
 
     NSMenuItem* detailRoot = [self itemWithTitle:@"Session details" action:nil key:@""];
     [details addItem:[NSMenuItem separatorItem]];
     NSMenuItem* aiRecap = [self itemWithTitle:@"Generate latest recap" action:@selector(onRunRecap:) key:@""];
-    aiRecap.enabled = snapshot.current_md_path[0] && !recording && st != ASCOLTO_STATE_STOPPING;
+    aiRecap.enabled = snapshot.current_md_path[0] && !recording && st != ASCOLTO_STATE_STOPPING &&
+        (!deferred || (!queue.processing && queue.queued_count == 0));
     [details addItem:aiRecap];
     detailRoot.submenu = details;
     [_statusMenu addItem:detailRoot];
@@ -538,6 +600,18 @@ static NSString* menu_text(const char* text) {
     }];
 }
 
+- (void)onCancelLocalTranscription:(NSMenuItem*)sender {
+    if (_terminationPending) return;
+    ascolto_deferred_request_cancel(_app->deferred_worker, [sender.representedObject longLongValue]);
+    [self rebuildMenu];
+}
+
+- (void)onRetryLocalTranscription:(NSMenuItem*)sender {
+    if (_terminationPending) return;
+    ascolto_deferred_request_retry(_app->deferred_worker, [sender.representedObject longLongValue]);
+    [self rebuildMenu];
+}
+
 - (void)onToggleAutoTrigger:(id)sender {
     (void)sender;
     [self performSessionAction:^(ascolto_live_app_t* app) {
@@ -711,6 +785,7 @@ static NSString* menu_text(const char* text) {
             *self.capture = NULL;
         }
         ascolto_live_app_stop_session(self.app);
+        ascolto_deferred_shutdown(self.app->deferred_worker);
         ascolto_archive_wait();
         /* NSTerminateLater may run a nested modal loop inside a main dispatch
            callback. Schedule its reply on the run loop so that callback can finish. */

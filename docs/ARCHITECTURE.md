@@ -7,6 +7,12 @@ integration history and algorithm comparison are in [INTEGRATION.md](INTEGRATION
 
 ## Data flow
 
+The shipped macOS app uses [native post-call transcription](design/post-call-transcription.md):
+capture writes paired PCM independently of inference, then a durable serial worker
+replays it through the processing stages below. The model is loaded only for
+queued work. Linux and live/offline regression harnesses retain their existing
+native orchestration.
+
 ```text
 Native MIC/SYS capture
     -> timestamped paired PCM queue
@@ -33,6 +39,9 @@ capture drains every queued sample before transcript/audio resources close.
 - `audio_processing.c`: RMS, streaming VAD, recent SYS envelope lookup, transcript
   filtering, MIC activity statistics and recent SYS turn history. Both controllers
   use the same echo state and matching rules; native VAD tuning stays explicit.
+- `deferred_store.c` and `macos/deferred.c`: persistent post-call jobs, checkpoints,
+  cancellation, recovery and copied worker progress. macOS production capture
+  bypasses ASR; replay uses the same VAD/filter/diarizer stages.
 - `local_stt.c` / `local_stt/`: copied model catalog state, background verified
   downloads, session-frozen engine selection and isolated native adapters. See
   [LOCAL_STT.md](LOCAL_STT.md).

@@ -16,11 +16,12 @@ from pathlib import Path
 import re
 import sqlite3
 import time
+import tempfile
 from zoneinfo import ZoneInfo
 
 from ascolto_files import atomic_text as _atomic_text
 
-VERSION, APPLICATION_ID, BUSY_TIMEOUT_MS = 1, 0x4153434C, 1500
+VERSION, APPLICATION_ID, BUSY_TIMEOUT_MS = 2, 0x4153434C, 1500
 SECRET_KEYS = {'api_key', 'access_token', 'refresh_token', 'id_token', 'authorization', 'client_secret', 'password', 'secret', 'token'}
 PROVIDERS = {'opencode-zen': ('opencode', 'zen'), 'opencode-go': ('opencode', 'go'), 'openrouter': ('openrouter', 'default'), 'openai': ('openai', 'default')}
 SETTINGS = {'platform', 'auto_monitoring', 'paused', 'transcription_language', 'capture_backend', 'mic_device_ref', 'sys_device_ref', 'save_audio', 'output_dir', 'settings_section', 'model_path', 'keywords_path', 'control_socket', 'recap_python', 'recap_tts', 'tts_language', 'diarizer_threshold', 'diarization_sensitivity', 'mic_debounce_ms', 'chatgpt_welcomed'}
@@ -98,6 +99,44 @@ class Database:
                         self.connection.execute(f'PRAGMA user_version={VERSION}')
                     elif version != VERSION:
                         raise DatabaseError('Database schema changed during initialization')
+            if version == 1:
+                # Backup API includes committed WAL pages and never replaces an older backup.
+                if str(path) == ':memory:':
+                    backup_path = None
+                else:
+                    descriptor, backup_path = tempfile.mkstemp(prefix=Path(path).name + '.schema-v1-backup-', dir=Path(path).parent)
+                    os.close(descriptor)
+                backup = sqlite3.connect(backup_path or ':memory:')
+                try:
+                    deadline = time.monotonic() + busy_timeout_ms / 1000
+                    def backup_progress(status, _remaining, _total):
+                        if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) and time.monotonic() >= deadline:
+                            raise DatabaseError('Database migration backup is busy')
+                    self.connection.backup(backup, progress=backup_progress, sleep=0.01)
+                    backup.execute('PRAGMA journal_mode=DELETE')
+                except BaseException:
+                    if backup_path:
+                        os.unlink(backup_path)
+                    raise
+                finally:
+                    backup.close()
+                with self.transaction():
+                    current = self.connection.execute('PRAGMA user_version').fetchone()[0]
+                    if current == 1:
+                        schema = Path(__file__).with_name('database_schema.sql').read_text()
+                        migration = schema[schema.index('-- Native deferred transcription schema version 2.'):]
+                        statement = ''
+                        for line in migration.splitlines(True):
+                            statement += line
+                            if sqlite3.complete_statement(statement):
+                                self.connection.execute(statement)
+                                statement = ''
+                        if statement.strip():
+                            raise DatabaseError('Incomplete migration statement')
+                        self.connection.execute('INSERT INTO schema_migrations VALUES(?,?)', (VERSION, now_ms()))
+                        self.connection.execute(f'PRAGMA user_version={VERSION}')
+                    elif current != VERSION:
+                        raise DatabaseError('Database schema changed during migration')
         except BaseException:
             self.close()
             raise

@@ -38,5 +38,6 @@ for engine in whisper-turbo-q5 parakeet-v3-q8 qwen3-asr-1.7b; do
         parakeet*) cp "$source/third_party/ggml/LICENSE" "$root/bin/local-stt/licenses/$engine-ggml.txt";;
     esac
 done
+sh "$root/scripts/build_nemotron_stt.sh"
 cp "$root/resources/LOCAL_STT_NOTICES.md" "$root/bin/local-stt/"
 cp "$root/resources/local-stt-manifest.json" "$root/bin/local-stt/"

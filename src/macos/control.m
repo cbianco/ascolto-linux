@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #include "ascolto/macos_control.h"
+#include "ascolto/deferred.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -25,9 +26,33 @@
 
 static NSString *safe_string(const char *value) { return [NSString stringWithUTF8String:value] ?: @""; }
 
+static NSString *model_state(ascolto_model_state_t state) {
+    switch (state) {
+        case ASCOLTO_MODEL_INCLUDED: return @"INCLUDED";
+        case ASCOLTO_MODEL_MISSING: return @"MISSING";
+        case ASCOLTO_MODEL_CHECKING: return @"CHECKING";
+        case ASCOLTO_MODEL_DOWNLOADING: return @"DOWNLOADING";
+        case ASCOLTO_MODEL_VERIFYING: return @"VERIFYING";
+        case ASCOLTO_MODEL_READY: return @"READY";
+        case ASCOLTO_MODEL_ERROR: return @"ERROR";
+        case ASCOLTO_MODEL_UNSUPPORTED: return @"UNSUPPORTED";
+    }
+    return @"UNKNOWN";
+}
+
 static NSDictionary *status(ascolto_live_app_t *app) {
     ascolto_live_snapshot_t snapshot;
     ascolto_live_app_read_snapshot(app, &snapshot);
+    ascolto_local_models_snapshot_t models = {0};
+    ascolto_local_models_snapshot(app->local_models, &models);
+    ascolto_deferred_snapshot_t deferred = {0};
+    ascolto_deferred_snapshot(app->deferred_worker, &deferred);
+    double progress = deferred.total_frames > 0 ? (double)deferred.processed_frames / deferred.total_frames : 0;
+    if (progress < 0) progress = 0;
+    if (progress > 1) progress = 1;
+    const ascolto_model_snapshot_t *selected = NULL;
+    for (int i = 0; i < ASCOLTO_LOCAL_MODEL_COUNT; ++i)
+        if (!strcmp(models.models[i].id, models.selected)) selected = &models.models[i];
     return @{@"ok": @YES, @"active": @YES, @"auto_mic_checked": @(snapshot.config.auto_trigger_mic),
         @"save_audio_checked": @(snapshot.config.save_audio), @"cloud_recap_checked": @(snapshot.config.cloud_recap),
         @"recap_tts_checked": @(snapshot.config.recap_tts), @"state": safe_string(ascolto_app_state_label(snapshot.state)),
@@ -36,7 +61,44 @@ static NSDictionary *status(ascolto_live_app_t *app) {
         @"save_audio": @(snapshot.config.save_audio), @"cloud_recap": @(snapshot.config.cloud_recap),
         @"recap_tts": @(snapshot.config.recap_tts), @"language": safe_string(snapshot.config.language),
         @"utterances": @(snapshot.utterances), @"remote_speakers": @(snapshot.remote_speakers),
-        @"settings_error": @(snapshot.settings_error), @"storage_error": @(snapshot.storage_error), @"mic_samples": @(snapshot.mic_samples), @"transcript": safe_string(snapshot.current_md_path)};
+        @"settings_error": @(snapshot.settings_error), @"storage_error": @(snapshot.storage_error),
+        @"transcription_error": @(snapshot.transcription_error),
+        @"mic_active": @(snapshot.mic_hardware_active), @"sys_audio_permission_ok": @(snapshot.sys_audio_permission_ok),
+        @"mic_samples": @(snapshot.mic_samples), @"sys_samples": @(snapshot.sys_samples),
+        @"capture_dropped_samples": @(snapshot.capture_dropped_samples),
+        @"mic_rms_db": @(snapshot.last_mic_rms_db), @"sys_rms_db": @(snapshot.last_sys_rms_db),
+        @"local_model": safe_string(models.selected), @"local_model_loading": @(models.loading[0] != 0),
+        @"local_model_state": selected ? model_state(selected->state) : @"UNKNOWN",
+        @"local_model_message": selected ? safe_string(selected->message) : @"",
+        @"local_model_error": safe_string(models.error),
+        @"deferred_transcription": @{
+            @"enabled": @(app->deferred_worker != NULL), @"available": @(deferred.available),
+            @"processing": @(deferred.processing), @"checking_model": @(deferred.checking_model),
+            @"paused_for_capture": @(deferred.paused_for_capture),
+            @"state": safe_string(deferred.state), @"job_id": @(deferred.job_id),
+            @"cancel_job_id": @(deferred.cancel_job_id), @"retry_job_id": @(deferred.retry_job_id),
+            @"session_id": @(deferred.session_id), @"model_id": safe_string(deferred.model_id),
+            @"processed_frames": @(deferred.processed_frames), @"total_frames": @(deferred.total_frames),
+            @"progress": @(progress), @"progress_unit": @"samples_per_channel",
+            @"completed_segments": @(deferred.completed_segments),
+            @"queued_count": @(deferred.queued_count), @"failed_count": @(deferred.failed_count),
+            @"error_code": safe_string(deferred.error_code)},
+        @"transcript": safe_string(snapshot.current_md_path)};
+}
+
+static NSDictionary *queue_command(ascolto_live_app_t *app, NSString *command, NSString *argument) {
+    long long job = 0;
+    NSScanner *scanner = [NSScanner scannerWithString:argument];
+    if (!app->deferred_worker || ![scanner scanLongLong:&job] || !scanner.isAtEnd || job <= 0)
+        return @{@"ok": @NO, @"error": @"An enabled local queue and a positive job ID are required"};
+    int result = [command isEqualToString:@"LOCAL_QUEUE_CANCEL"] ?
+        ascolto_deferred_request_cancel(app->deferred_worker, job) :
+        ascolto_deferred_request_retry(app->deferred_worker, job);
+    if (result) return @{@"ok": @NO, @"error": @"Local transcription command was not queued", @"code": @(result)};
+    NSMutableDictionary *response = [status(app) mutableCopy];
+    response[@"queued_command"] = command;
+    response[@"job_id"] = @(job);
+    return response;
 }
 
 static NSDictionary *execute(AscoltoControlServer *server, NSString *command, NSString *argument) {
@@ -101,6 +163,8 @@ static void *serve(void *argument) {
                 __block NSDictionary *response = @{@"ok": @NO, @"error": @"Invalid or incomplete command"};
                 if (line.length && length < sizeof(input) && memchr(input, '\n', length)) {
                     if ([command isEqualToString:@"STATUS"] || [command isEqualToString:@"GET_TRAY_STATE"]) response = status(server.app);
+                    else if ([@[@"LOCAL_QUEUE_CANCEL", @"LOCAL_QUEUE_RETRY"] containsObject:command])
+                        response = queue_command(server.app, command, value);
                     else if (server.running) dispatch_sync(server.actions, ^{
                         if (server.running) response = execute(server, command, value);
                     });

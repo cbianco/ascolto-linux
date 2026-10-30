@@ -1,0 +1,15 @@
+{
+  "recipe_sha256": "05cd4b01e6fe54390b275703173ef58c5436451a58fe7d93407152a0ec0be03c",
+  "reference_sha256": "03142dde5176c1d4df21ee829642745a1d670ea4d79e1a4684c64d53195acff2",
+  "environment": {
+    "python": "3.13.18",
+    "packages": {
+      "torch": "2.15.0",
+      "transformers": "5.5.1",
+      "safetensors": "0.8.0",
+      "numpy": "2.5.4",
+      "PyYAML": "6.0.3",
+      "sentencepiece": "0.2.2"
+    }
+  }
+}

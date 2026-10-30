@@ -675,6 +675,8 @@ int ascolto_storage_latest_transcript(const char *config, char *markdown,
       "j.state='ready' ORDER BY j.created_at_ms DESC,j.id DESC LIMIT 1) "
       "FROM artifacts a JOIN sessions s ON s.id=a.session_id "
       "WHERE a.kind='transcript_md' AND a.state='ready' "
+      "AND CASE WHEN json_valid(s.metadata_json) THEN "
+      "coalesce(json_extract(s.metadata_json,'$.native_transcription_source_session'),0) ELSE 0 END=0 "
       "ORDER BY s.started_at_ms DESC,s.id DESC,a.created_at_ms DESC,a.id DESC",
       -1, &query, NULL);
   if (!rc) {

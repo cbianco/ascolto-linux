@@ -18,9 +18,9 @@ transcription or speaker accuracy.
 
 ## Optional native speech engines
 
-Default native builds prepare all three in-process adapters through
+Default native builds prepare all five optional in-process adapters through
 `make local-stt-deps`; this builds pinned C/C++ sources and never downloads optional weights.
-The build requires Git, CMake and a C/C++ compiler. Linux also requires libcurl,
+The build requires Git, CMake 3.26+ and a C/C++ compiler. Linux also requires libcurl,
 OpenSSL and OpenBLAS development packages (`libcurl4-openssl-dev libssl-dev
 libopenblas-dev` on Debian/Ubuntu). macOS uses system libcurl, CommonCrypto,
 Accelerate and Metal. The app bundle copies the adapters and license notices; it
@@ -53,3 +53,48 @@ and verifies the native AppKit window in light/dark appearance. GTK diagnostics
 are covered by `make test-tray` under Xvfb, including filtering and the copy
 preview; an SVG loader is required by the existing icon tests. See
 [Activity and diagnostics](design/activity-diagnostics.md).
+
+`make test-nemotron-ssd` runs synthetic bounded-cache, fused/separate BF16 and Q8_0 graphs,
+reference F32 convolution, native repacker, corpus scorer and native capture-queue
+replay tests. Metal, wide-slot and mapping fallback variants are documented in [LOCAL_STT.md](LOCAL_STT.md). The ordinary
+model-manager suite includes native preparation, verified descriptors,
+cancellation during preparation/verification, corrupt output, directory
+replacement, missing preparation ABI and restart cleanup. No speech weights are
+required for these suites. Full-model tests use separately installed packages in
+a temporary config and never use the microphone or cloud.
+
+Prepare the optional public English evaluation corpus with
+`python3 scripts/prepare_nemotron_eval.py`. This downloads the checksum-verified
+LibriSpeech test archives into ignored `build/nemotron-eval/`; it selects 20
+speakers before inference and creates long, seeded noisy and overlap probes.
+Score decoder JSONL with
+`python3 scripts/score_nemotron_eval.py --manifest build/nemotron-eval/manifest.tsv --results RUN.jsonl --output REPORT.json`;
+add `--baseline BASELINE.jsonl` for transcript and accuracy/performance deltas.
+Overlap probes are excluded from WER/CER. This small read speech subset does not
+establish conversational-call accuracy.
+
+Replay measured decoder delays through the unchanged portable C capture queue
+with `python3 scripts/replay_nemotron_queue.py --manifest build/nemotron-eval/manifest.tsv --results RUN.jsonl --duration-seconds 1800 --output build/nemotron-eval/queue.json`.
+The accelerated replay verifies indexed PCM order, equal-duration overflow
+silence on both channels and final drain. It does not exercise microphones, VAD,
+or live recognition. Run just the lightweight scoring/replay fixtures with
+`python3 -m unittest discover -s tests -p 'test_nemotron_eval.py'` and
+`python3 -m unittest discover -s tests -p 'test_nemotron_queue_replay.py'`.
+
+## Native post-call queue
+
+`make test-deferred` verifies the durable native store, worker and production
+capture/replay pipeline using synthetic PCM and model stubs. It covers checkpoint
+resume without duplicate inference or utterances, cancellation, model reuse,
+recording priority, corrupted/replaced sources, crash recovery and cleanup after
+durable completion. No microphone, model download or cloud service is used.
+See [post-call transcription](design/post-call-transcription.md) for lifecycle,
+retention and recovery contracts. The shipped macOS app enables this mode;
+existing live harnesses remain available for explicit algorithm comparisons.
+
+`make test-retranscribe` verifies historical-call preparation with synthetic
+16/48 kHz WAV and native M4A AAC, separate version artifacts, unchanged source
+hashes, frozen model/language/vocabulary, duplicate protection, cancellation and
+transaction rollback. macOS codec services must be available outside a restricted
+sandbox. `make test-activity` exercises the actual Transcribe again sheet/buttons
+with mocked enqueue and renders the overview in light/dark appearance.

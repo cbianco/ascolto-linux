@@ -31,7 +31,7 @@ int main(int argc,char **argv) {
     CHECK(ascolto_db_open(path,1500,&db,error,sizeof(error))==SQLITE_OK);
     sqlite3 *native=ascolto_db_sqlite(db);
     CHECK(scalar(native,"PRAGMA foreign_keys")==1);
-    CHECK(scalar(native,"PRAGMA user_version")==1);
+    CHECK(scalar(native,"PRAGMA user_version")==ASCOLTO_DATABASE_VERSION);
     CHECK(scalar(native,"SELECT count(*) FROM schema_migrations")==1);
     struct stat mode; CHECK(!stat(path,&mode)&&(mode.st_mode&0777)==0600);
     ascolto_db_session_t s={.started_at_ms=100000,.capture_backend="coreaudio",.call_title="L'appel d'Élodie",.metadata_json="{\"manual\":true}"};

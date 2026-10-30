@@ -12,12 +12,12 @@ LDFLAGS  := vendor/needle/libneedle.a -lc++ -lsqlite3 -lcurl \
             -framework Cocoa
 
 # Keep offline simulation and acoustic fixtures out of the shipped app.
-SESSION_SRCS := src/local_stt.c src/database.c src/storage.c src/ai_settings.c src/filesystem.c src/diagnostics.c src/config.c src/mic_monitor.c \
+SESSION_SRCS := src/deferred_store.c src/macos/deferred.c src/local_stt.c src/database.c src/storage.c src/ai_settings.c src/filesystem.c src/diagnostics.c src/config.c src/mic_monitor.c \
                 src/macos/whistle_engine.c src/macos/diarizer.c src/macos/recap.c \
                 src/live_session.c src/macos/transcript.c src/capture_buffer.c src/audio_processing.c
 CAPTURE_SRCS := src/capture_macos.c
 OFFLINE_SRCS := src/wav_audio.c tests/capture_buffer_verify.c src/simulated_monitor.c src/vad.c src/session.c src/room_bench.c
-APP_SRCS := $(SESSION_SRCS) $(CAPTURE_SRCS) src/macos/control.m src/macos/settings.m src/macos/activity.m src/menubar_macos.m src/app_main.c
+APP_SRCS := src/macos/retranscribe.c $(SESSION_SRCS) $(CAPTURE_SRCS) src/macos/control.m src/macos/settings.m src/macos/activity.m src/menubar_macos.m src/app_main.c
 HARNESS_SRCS := $(SESSION_SRCS) $(CAPTURE_SRCS) $(OFFLINE_SRCS) src/harness_main.c
 REGRESSION_SRCS := $(SESSION_SRCS) tests/regression_main.c
 CONTROL_TEST_SRCS := $(SESSION_SRCS) src/macos/control.m tests/control_main.m
@@ -101,7 +101,7 @@ $(BUNDLE_STAMP): $(APP_BIN) models/whistle.cact $(RUNTIME_FILES) assets/chatgpt-
 	@cp $(APP_BIN) $(APP_BUNDLE)/Contents/MacOS/Ascolto
 	@cp assets/chatgpt-logo.svg $(APP_BUNDLE)/Contents/Resources/
 	@cp assets/Ascolto.icns $(APP_BUNDLE)/Contents/Resources/Ascolto.icns
-	@if test -d bin/local-stt; then mkdir -p $(APP_BUNDLE)/Contents/Resources/local-stt; cp -R bin/local-stt/. $(APP_BUNDLE)/Contents/Resources/local-stt/; fi
+	@if test -d bin/local-stt; then rm -rf $(APP_BUNDLE)/Contents/Resources/local-stt; mkdir -p $(APP_BUNDLE)/Contents/Resources/local-stt; cp -R bin/local-stt/. $(APP_BUNDLE)/Contents/Resources/local-stt/; fi
 	@cp models/whistle.cact $(APP_BUNDLE)/Contents/Resources/whistle.cact
 	@cp $(RUNTIME_FILES) $(APP_BUNDLE)/Contents/Resources/
 	@if test -x .venv/bin/python3 && .venv/bin/python3 -c 'import numpy, requests, jwt, cryptography' >/dev/null 2>&1; then \
@@ -138,7 +138,7 @@ test: build bundle test-portable test-history
 	./$(HARNESS) test
 	./$(REGRESSION)
 	./$(BIN_DIR)/ascolto-control-test
-	./$(APP_BIN) --config /tmp/ascolto-test/smoke_config.json --smoke-test
+	@smoke_dir=$$(mktemp -d /tmp/ascolto-menu-smoke-XXXXXX); ./$(APP_BIN) --config "$$smoke_dir/config.json" --smoke-test; result=$$?; rm -rf "$$smoke_dir"; exit $$result
 
 room-bench: build
 	@test -f tests/fixtures/spk3_turn1.wav || $(MAKE) fixtures
@@ -168,9 +168,9 @@ clean:
 	rm -f build/local-stt/.ready
 
 .PHONY: test-settings
-bin/ascolto-settings-test: src/macos/activity.m src/macos/activity.h src/local_stt.c src/local_stt_manifest.inc include/ascolto/local_stt.h src/macos/settings.m src/macos/settings.h src/ai_settings.c src/storage.c src/database.c src/database_schema.inc src/filesystem.c tests/settings_macos.m
+bin/ascolto-settings-test: src/macos/activity.m src/macos/activity.h src/local_stt.c src/local_stt_manifest.inc include/ascolto/local_stt.h src/macos/settings.m src/macos/settings.h src/ai_settings.c src/storage.c src/database.c src/database_schema.inc src/filesystem.c src/macos/retranscribe.c src/deferred_store.c tests/settings_macos.m
 	@mkdir -p bin
-	$(CC) $(OBJCFLAGS) src/macos/activity.m src/macos/settings.m src/local_stt.c src/ai_settings.c src/storage.c src/database.c src/filesystem.c tests/settings_macos.m -lcurl -lsqlite3 -lpthread -framework Cocoa -o $@
+	$(CC) $(OBJCFLAGS) src/macos/activity.m src/macos/settings.m src/local_stt.c src/ai_settings.c src/storage.c src/database.c src/filesystem.c src/macos/retranscribe.c src/deferred_store.c tests/settings_macos.m -lcurl -lsqlite3 -lpthread -framework Cocoa -framework AudioToolbox -framework CoreFoundation -o $@
 
 test-settings: bin/ascolto-settings-test
 	./bin/ascolto-settings-test build/settings-previews
@@ -205,3 +205,38 @@ $(BIN_DIR)/ascolto-local-stt-runtime: src/local_stt.c src/database.c src/storage
 
 $(BIN_DIR)/ascolto-local-stt-pipeline: $(call objects,$(LOCAL_STT_PIPELINE_SRCS)) vendor/needle/libneedle.a
 	$(CC) $(call objects,$(LOCAL_STT_PIPELINE_SRCS)) $(LDFLAGS) -o $@
+
+# Persistent post-call jobs, native worker scheduling and production audio replay.
+DEFERRED_STORE_TEST_SRCS := src/database.c src/storage.c src/ai_settings.c src/filesystem.c src/deferred_store.c
+.PHONY: test-deferred
+test-deferred: $(BIN_DIR)/ascolto-deferred-store-test $(BIN_DIR)/ascolto-deferred-worker-test $(BIN_DIR)/ascolto-deferred-pipeline-test
+	./$(BIN_DIR)/ascolto-deferred-store-test
+	./$(BIN_DIR)/ascolto-deferred-worker-test
+	./$(BIN_DIR)/ascolto-deferred-pipeline-test
+
+$(BIN_DIR)/ascolto-deferred-store-test: $(DEFERRED_STORE_TEST_SRCS) tests/deferred_store.c include/ascolto/deferred_store.h src/database_schema.inc
+	@mkdir -p $(BIN_DIR)
+	$(CC) -std=c11 -Wall -Wextra -O2 -Iinclude $(DEFERRED_STORE_TEST_SRCS) tests/deferred_store.c -lsqlite3 -lpthread -o $@
+
+$(BIN_DIR)/ascolto-deferred-worker-test: $(DEFERRED_STORE_TEST_SRCS) src/macos/deferred.c tests/deferred_worker.c include/ascolto/deferred.h include/ascolto/deferred_store.h src/database_schema.inc
+	@mkdir -p $(BIN_DIR)
+	$(CC) -std=c11 -Wall -Wextra -O2 -Iinclude $(DEFERRED_STORE_TEST_SRCS) src/macos/deferred.c tests/deferred_worker.c -lsqlite3 -lpthread -o $@
+
+$(BIN_DIR)/ascolto-deferred-pipeline-test: $(DEFERRED_STORE_TEST_SRCS) src/config.c src/audio_processing.c src/macos/diarizer.c src/live_session.c src/macos/transcript.c tests/deferred_pipeline.c include/ascolto.h include/ascolto/deferred_store.h src/database_schema.inc
+	@mkdir -p $(BIN_DIR)
+	$(CC) -std=c11 -Wall -Wextra -O2 -Iinclude $(DEFERRED_STORE_TEST_SRCS) src/config.c src/audio_processing.c src/macos/diarizer.c src/live_session.c src/macos/transcript.c tests/deferred_pipeline.c -lsqlite3 -lpthread -lm -o $@
+
+.PHONY: test-startup-guard
+test: test-deferred test-startup-guard
+test-startup-guard: $(APP_BIN)
+	ASCOLTO_STARTUP_TEST_BINARY=$(APP_BIN) python3 -m unittest discover -s tests -p 'test_startup_guard.py'
+
+.PHONY: test-retranscribe
+test-retranscribe: $(BIN_DIR)/ascolto-retranscribe-test
+	./$(BIN_DIR)/ascolto-retranscribe-test
+
+$(BIN_DIR)/ascolto-retranscribe-test: $(DEFERRED_STORE_TEST_SRCS) src/macos/retranscribe.c tests/retranscribe.c include/ascolto/retranscribe.h include/ascolto/deferred_store.h src/database_schema.inc
+	@mkdir -p $(BIN_DIR)
+	$(CC) -std=c11 -Wall -Wextra -O2 -Iinclude $(DEFERRED_STORE_TEST_SRCS) src/macos/retranscribe.c tests/retranscribe.c -lsqlite3 -lpthread -framework AudioToolbox -framework CoreFoundation -o $@
+
+test: test-retranscribe

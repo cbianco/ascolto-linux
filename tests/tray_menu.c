@@ -82,6 +82,18 @@ static void preview_settings(ascolto_core_t *core) {
     /* All native settings must remain usable alongside the serial menu queue. */
     p->settings_category = 2; settings_build(&core->tray);
     assert(p->settings_keywords && p->local_models_box);
+    ascolto_local_models_snapshot_t before,after;
+    ascolto_local_models_snapshot(core->local_models,&before);
+    const int precisions[]={8,16,8};
+    for(int i=0;i<3;i++){
+        void *precision=g_object_get_data(G_OBJECT(p->local_models_box),"nemotron-precision");assert(precision);
+        s_gtk_combo_box_set_active_id(precision,ascolto_nemotron_id(precisions[i]));
+        ascolto_tray_step_iteration(&core->tray);
+        assert(p->nemotron_bits==precisions[i]);
+        GList *rows=s_gtk_container_get_children(p->local_models_box);
+        assert(g_list_length(rows)==6);g_list_free(rows); /* Header + five model families. */
+        ascolto_local_models_snapshot(core->local_models,&after);assert(!strcmp(before.selected,after.selected));
+    }
     /* The cloud tab keeps a distinct model and consent surface. */
     p->settings_cloud_tab=true;settings_build(&core->tray);assert(p->stt_model&&p->stt_consent&&!p->local_models_box);
     p->settings_cloud_tab=false;settings_build(&core->tray);assert(p->settings_keywords&&p->local_models_box);

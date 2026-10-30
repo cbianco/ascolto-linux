@@ -31,8 +31,8 @@ def organize(config, apply=False):
         root = Path(db.settings()['output_dir']).expanduser().resolve()
         if not root.is_dir() or root in (Path('/'), Path.home()):
             raise DatabaseError('Choose a dedicated archive directory first')
-        if db.connection.execute("SELECT 1 FROM sessions WHERE state IN ('recording','paused','stopping') LIMIT 1").fetchone() or db.connection.execute("SELECT 1 FROM recap_jobs WHERE status IN ('queued','validating','running') LIMIT 1").fetchone():
-            raise DatabaseError('Finish recording and AI jobs before reorganizing')
+        if db.connection.execute("SELECT 1 FROM sessions WHERE state IN ('recording','paused','stopping') LIMIT 1").fetchone() or db.connection.execute("SELECT 1 FROM recap_jobs WHERE status IN ('queued','validating','running') LIMIT 1").fetchone() or db.connection.execute("SELECT 1 FROM native_transcription_jobs WHERE state IN ('recording','queued','running') LIMIT 1").fetchone():
+            raise DatabaseError('Finish recording and local or cloud jobs before reorganizing')
         if apply:
             address = db.settings()['control_socket'] or f'/tmp/ascolto-{os.getuid()}.sock'
             with socket.socket(socket.AF_UNIX) as probe:

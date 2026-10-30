@@ -18,8 +18,24 @@ static const artifact_t artifacts_3[] = {
     {"tokenizer_config.json", "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/resolve/7278e1e70fe206f11671096ffdd38061171dd6e5/tokenizer_config.json", "4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c", 12487ULL},
     {"vocab.json", "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/resolve/7278e1e70fe206f11671096ffdd38061171dd6e5/vocab.json", "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910", 2776833ULL},
 };
-static const package_t packages[] = { {NULL, 0},
-    {artifacts_1, sizeof(artifacts_1) / sizeof(artifacts_1[0])},
-    {artifacts_2, sizeof(artifacts_2) / sizeof(artifacts_2[0])},
-    {artifacts_3, sizeof(artifacts_3) / sizeof(artifacts_3[0])},
+static const artifact_t artifacts_4[] = {
+    {"decoder.gguf", "https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF/resolve/dbd06c5cad7a2f33c8e06be2fb3ef814dbd9aa59/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-Q8_0.gguf", "3d99075b58f15153d87e8922f54e12dda818bbb505c2e0d7d50cd4f30beac9f2", 35004643232ULL},
+    {"encoder.gguf", "https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF/resolve/dbd06c5cad7a2f33c8e06be2fb3ef814dbd9aa59/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-Encoder-F16.gguf", "4221029c8a565c4a80c507ffa760c716e595acf663f9f4273ce69910050e7ba2", 1670410080ULL},
+    {"LICENSE", "https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF/resolve/dbd06c5cad7a2f33c8e06be2fb3ef814dbd9aa59/LICENSE", "18c3a96fd1ee779263aa9210e3d962d5899511890254f3f3efd70ece81d89866", 2694ULL},
+};
+static const artifact_t artifacts_5[] = {
+    {"model.safetensors", "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B/resolve/a99e33f698257b8b69ca7834f19c73582eb1fa7e/model.safetensors", "03142dde5176c1d4df21ee829642745a1d670ea4d79e1a4684c64d53195acff2", 67496013734ULL},
+    {"LICENSE", "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B/resolve/a99e33f698257b8b69ca7834f19c73582eb1fa7e/LICENSE", "18c3a96fd1ee779263aa9210e3d962d5899511890254f3f3efd70ece81d89866", 2694ULL},
+};
+static const artifact_t installed_5[] = {
+    {"decoder.gguf", NULL, "c73adfea49a9a1ab3543e68aa0d66af5c5d4d4d709f67b031f414e4bc40ac7a4", 63181504832ULL},
+    {"encoder.gguf", NULL, "45c136bb89ff31ea17c844c3ead34d65be9bf3735cbe7b4761f3671ab5079742", 2934467328ULL},
+    {"LICENSE", NULL, "18c3a96fd1ee779263aa9210e3d962d5899511890254f3f3efd70ece81d89866", 2694ULL},
+};
+static const package_t packages[] = { {NULL, 0, NULL, 0, 0},
+    {artifacts_1, sizeof(artifacts_1) / sizeof(artifacts_1[0]), NULL, 0, 0ULL},
+    {artifacts_2, sizeof(artifacts_2) / sizeof(artifacts_2[0]), NULL, 0, 0ULL},
+    {artifacts_3, sizeof(artifacts_3) / sizeof(artifacts_3[0]), NULL, 0, 0ULL},
+    {artifacts_4, sizeof(artifacts_4) / sizeof(artifacts_4[0]), NULL, 0, 0ULL},
+    {artifacts_5, sizeof(artifacts_5) / sizeof(artifacts_5[0]), installed_5, sizeof(installed_5) / sizeof(installed_5[0]), 66115972160ULL},
 };

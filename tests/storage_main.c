@@ -160,6 +160,18 @@ int main(void) {
       ascolto_db_sqlite(db),
       "UPDATE artifacts SET state='ready' WHERE kind='transcript_md'", NULL,
       NULL, NULL));
+  /* A newer transcription version belongs to its original call and must not
+   * replace the latest-call shortcuts after restart. */
+  char version_md[1024], version_jsonl[1024], version_metadata[128];
+  snprintf(version_md, sizeof(version_md), "%s/version.md", directory);
+  snprintf(version_jsonl, sizeof(version_jsonl), "%s/version.jsonl", directory);
+  snprintf(version_metadata, sizeof(version_metadata), "{\"native_transcription_source_session\":%lld}", (long long)session);
+  values.metadata_json = version_metadata;
+  int64_t version_session = 0;
+  CHECK(!ascolto_storage_session(config, &values, version_md, version_jsonl, &version_session));
+  CHECK(version_session > session);
+  CHECK(!ascolto_storage_latest_transcript(config, restored_md, sizeof(restored_md), restored_jsonl, sizeof(restored_jsonl)));
+  CHECK(!strcmp(restored_md, canonical_md) && !strcmp(restored_jsonl, canonical_jsonl));
   ascolto_db_close(db);
   char cwd[4096];
   CHECK(getcwd(cwd, sizeof(cwd)) != NULL);

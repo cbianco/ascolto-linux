@@ -34,6 +34,22 @@ static int pragma(sqlite3 *db, const char *sql, int *value) {
     sqlite3_finalize(s); return rc;
 }
 int64_t ascolto_db_now_ms(void) { struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts); return (int64_t)ts.tv_sec*1000+ts.tv_nsec/1000000; }
+/* Back up with SQLite so committed WAL contents are included before migration. */
+static int migration_backup(ascolto_db_t *db, const char *path) {
+    size_t n=strlen(path)+64; char *backup_path=malloc(n); if(!backup_path) return SQLITE_NOMEM;
+    snprintf(backup_path,n,"%s.schema-v1-backup-XXXXXX",path);
+    int fd=mkstemp(backup_path); if(fd<0) { free(backup_path); return SQLITE_CANTOPEN; } close(fd);
+    sqlite3 *backup_db=NULL; int rc=sqlite3_open_v2(backup_path,&backup_db,SQLITE_OPEN_READWRITE,NULL);
+    if(rc==SQLITE_OK) {
+        sqlite3_backup *backup=sqlite3_backup_init(backup_db,"main",db->sql,"main");
+        if(!backup) rc=sqlite3_errcode(backup_db);
+        else { rc=sqlite3_backup_step(backup,-1); int end=sqlite3_backup_finish(backup); if(rc==SQLITE_DONE) rc=end; }
+    }
+    if(rc==SQLITE_OK) rc=sqlite3_exec(backup_db,"PRAGMA journal_mode=DELETE",NULL,NULL,NULL);
+    if(backup_db) sqlite3_close(backup_db);
+    if(rc!=SQLITE_OK) unlink(backup_path);
+    free(backup_path); return rc;
+}
 int ascolto_db_open(const char *path, int timeout, ascolto_db_t **out, char *error, size_t cap) {
     if(out) *out=NULL;
     if(!path || !out || timeout<0 || timeout>10000) { copy_error(error,cap,"Invalid database arguments"); return SQLITE_MISUSE; }
@@ -61,10 +77,21 @@ int ascolto_db_open(const char *path, int timeout, ascolto_db_t **out, char *err
         if((rc=pragma(db->sql,"PRAGMA user_version",&version))!=SQLITE_OK) { exec(db,"ROLLBACK"); goto failed; }
         if(!version) {
             rc=exec(db,schema);
-            if(rc==SQLITE_OK) rc=exec(db,"INSERT INTO schema_migrations VALUES(1,CAST(strftime('%s','now') AS INTEGER)*1000); PRAGMA application_id=1095975756; PRAGMA user_version=1");
+            if(rc==SQLITE_OK) rc=exec(db,"INSERT INTO schema_migrations VALUES(2,CAST(strftime('%s','now') AS INTEGER)*1000); PRAGMA application_id=1095975756; PRAGMA user_version=2");
         } else if(version!=ASCOLTO_DATABASE_VERSION) rc=SQLITE_SCHEMA;
         if(rc!=SQLITE_OK) { char saved[256]; copy_error(saved,sizeof(saved),db->error); exec(db,"ROLLBACK"); copy_error(db->error,sizeof(db->error),saved); goto failed; }
         if((rc=exec(db,"COMMIT"))!=SQLITE_OK) goto failed;
+    }
+    if(version==1) {
+        if((rc=migration_backup(db,path))!=SQLITE_OK) goto failed;
+        if((rc=exec(db,"BEGIN IMMEDIATE"))!=SQLITE_OK) goto failed;
+        if((rc=pragma(db->sql,"PRAGMA user_version",&version))==SQLITE_OK && version==1) {
+            const char *migration=strstr(schema,"-- Native deferred transcription schema version 2.");
+            rc=migration?exec(db,migration):SQLITE_SCHEMA;
+            if(rc==SQLITE_OK) rc=exec(db,"INSERT INTO schema_migrations VALUES(2,CAST(strftime('%s','now') AS INTEGER)*1000); PRAGMA user_version=2");
+        } else if(rc==SQLITE_OK && version!=ASCOLTO_DATABASE_VERSION) rc=SQLITE_SCHEMA;
+        if(rc!=SQLITE_OK) { exec(db,"ROLLBACK"); goto failed; }
+        if((rc=exec(db,"COMMIT"))!=SQLITE_OK) { exec(db,"ROLLBACK"); goto failed; }
     }
     copy_error(error,cap,""); *out=db; return SQLITE_OK;
 failed:

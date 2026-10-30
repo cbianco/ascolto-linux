@@ -55,11 +55,17 @@ int main(int argc, const char **argv) {
         SettingsPreviewTarget *target = [[SettingsPreviewTarget alloc] init];
         __block ascolto_local_models_snapshot_t localModels = {0};
         snprintf(localModels.selected,sizeof(localModels.selected),"whistle");localModels.available_bytes=32000000000ULL;
-        const char *ids[]={"whistle","whisper-turbo-q5","parakeet-v3-q8","qwen3-asr-1.7b"};
-        const char *names[]={"Whistle","Whisper large-v3-turbo Q5","Parakeet TDT v3","Qwen3-ASR 1.7B"};
-        const char *descriptions[]={"Current baseline. Lower agreement in our sample; very lightweight.","Closest to the cloud reference in our Italian sample.","Good agreement in our sample, with very low processing delay.","Good agreement in our sample. Uses more memory than the other options."};
-        const char *hints[]={"Default · included · 17 MB","Best test agreement","Speed / quality balance","CPU option · about 7 GB memory"};
-        for(int i=0;i<4;i++){snprintf(localModels.models[i].id,40,"%s",ids[i]);snprintf(localModels.models[i].name,80,"%s",names[i]);snprintf(localModels.models[i].description,160,"%s",descriptions[i]);snprintf(localModels.models[i].hint,64,"%s",hints[i]);localModels.models[i].state=i?ASCOLTO_MODEL_MISSING:ASCOLTO_MODEL_INCLUDED;localModels.models[i].selected=i==0;localModels.models[i].bytes=i==1?574041195ULL:i==2?940663680ULL:i==3?4703112789ULL:0;}
+        const char *ids[]={"whistle", "whisper-turbo-q5", "parakeet-v3-q8", "qwen3-asr-1.7b", "nemotron-3.5-q8", "nemotron-3.5-bf16-ssd"};
+        const char *names[]={"Whistle", "Whisper large-v3-turbo Q5", "Parakeet TDT v3", "Qwen3-ASR 1.7B", "Nemotron 3.5 Transcribe Q8_0", "Nemotron 3.5 Transcribe BF16 SSD"};
+        const char *descriptions[]={
+    "Current baseline. Lower agreement in our sample; very lightweight.",
+    "Closest to the cloud reference in our Italian sample.",
+    "Good agreement in our sample, with very low processing delay.",
+    "Good agreement in our sample. Uses more memory than the other options.",
+    "8-bit Q8_0 decoder with F16 audio encoder and a bounded SSD expert cache. Native CPU/Metal.",
+    "Original BF16 weights with a bounded SSD expert cache. Experimental: high processing delay. Installation temporarily needs about 134 GB."};
+        const char *hints[]={"Default · included · 17 MB", "Best test agreement", "Speed / quality balance", "CPU option · about 7 GB memory", "Q8_0 · SSD cache 4 GiB · CPU / Metal", "BF16 · SSD cache 4 GiB · high delay"};
+        for(int i=0;i<ASCOLTO_LOCAL_MODEL_COUNT;i++){snprintf(localModels.models[i].id,40,"%s",ids[i]);snprintf(localModels.models[i].name,80,"%s",names[i]);snprintf(localModels.models[i].description,160,"%s",descriptions[i]);snprintf(localModels.models[i].hint,64,"%s",hints[i]);localModels.models[i].state=i?ASCOLTO_MODEL_MISSING:ASCOLTO_MODEL_INCLUDED;localModels.models[i].selected=i==0;localModels.models[i].bytes=i==1?574041195ULL:i==2?940663680ULL:i==3?4703112789ULL:i==4?36675056006ULL:i==5?67496016428ULL:0;}
         AscoltoSettingsWindow *controller = [[AscoltoSettingsWindow alloc] initWithOptions:^NSDictionary* {
             return @{@"localModelsFixture":[NSData dataWithBytes:&localModels length:sizeof(localModels)], @"config": @"/tmp/ascolto-settings-preview/config.json", @"output": @"~/Documents/Ascolto", @"automatic": @YES, @"saveAudio": @YES, @"cloudRecap": @NO, @"tts": @NO, @"busy": @NO,
                      @"languageMenu": menu(@"Language"), @"speakersMenu": menu(@"Speakers"), @"micMenu": menu(@"Microphone"), @"sysMenu": menu(@"Call audio")};
@@ -104,9 +110,10 @@ int main(int argc, const char **argv) {
             }
         }
         [controller setValue:@"Transcription" forKey:@"category"];
+        [controller.window setContentSize:NSMakeSize(1080,820)];
         for(NSString *theme in @[@"light",@"dark"]){
             controller.window.appearance=[NSAppearance appearanceNamed:[theme isEqual:@"light"]?NSAppearanceNameAqua:NSAppearanceNameDarkAqua];
-            for(NSString *state in @[@"initial",@"downloading",@"ready-retry",@"recording",@"unsupported",@"cloud"]){
+            for(NSString *state in @[@"initial",@"downloading",@"ready-retry",@"recording",@"unsupported",@"cloud",@"nemotron-ready",@"nemotron-downloading",@"bf16-ready",@"bf16-preparing",@"bf16-error",@"q8-ready",@"q8-downloading"]){
                 [controller setValue:@([state isEqual:@"cloud"]?1:0) forKey:@"transcriptionTab"];
                 snprintf(localModels.selected,40,"%s",[state isEqual:@"ready-retry"]?"whisper-turbo-q5":"whistle");
                 localModels.models[0].selected=![state isEqual:@"ready-retry"];localModels.models[1].selected=[state isEqual:@"ready-retry"];
@@ -114,12 +121,53 @@ int main(int argc, const char **argv) {
                 localModels.models[1].transferred=210000000;
                 localModels.models[2].state=ASCOLTO_MODEL_READY;
                 localModels.models[3].state=ASCOLTO_MODEL_ERROR;
+                [controller setValue:@0 forKey:@"nemotronBits"];
+                localModels.models[4].selected=NO; localModels.models[4].state=ASCOLTO_MODEL_MISSING;
+                localModels.models[4].selected=NO;
+                localModels.models[4].state=ASCOLTO_MODEL_MISSING;
+                localModels.models[5].selected=NO;
+                localModels.models[5].state=ASCOLTO_MODEL_MISSING;
+                localModels.models[5].message[0]=0;
                 snprintf(localModels.models[3].message,256,"Download interrupted. Check connection and retry.");
                 if([state isEqual:@"unsupported"]){localModels.models[3].state=ASCOLTO_MODEL_UNSUPPORTED;snprintf(localModels.models[3].message,256,"Native runtime is unavailable in this build. Install a build with local model support.");}
-                if([state isEqual:@"initial"]){for(int i=1;i<4;i++){localModels.models[i].state=ASCOLTO_MODEL_MISSING;localModels.models[i].message[0]=0;}}
+                if([state isEqual:@"initial"]){for(int i=1;i<ASCOLTO_LOCAL_MODEL_COUNT;i++){localModels.models[i].state=ASCOLTO_MODEL_MISSING;localModels.models[i].message[0]=0;}}
+                if([state hasPrefix:@"nemotron-"]){
+                    localModels.models[4].state=[state isEqual:@"nemotron-ready"]?ASCOLTO_MODEL_READY:ASCOLTO_MODEL_DOWNLOADING;
+                    localModels.models[4].transferred=9000000000ULL;
+                    if([state isEqual:@"nemotron-ready"]){snprintf(localModels.selected,40,"nemotron-3.5-q8");localModels.models[0].selected=NO;localModels.models[1].selected=NO;localModels.models[4].selected=YES;}
+                }
+                if([state hasPrefix:@"bf16-"]){
+                    [controller setValue:@16 forKey:@"nemotronBits"];
+                    localModels.models[5].state=[state isEqual:@"bf16-ready"]?ASCOLTO_MODEL_READY:[state isEqual:@"bf16-preparing"]?ASCOLTO_MODEL_VERIFYING:ASCOLTO_MODEL_ERROR;
+                    snprintf(localModels.models[5].message,256,"%s",[state isEqual:@"bf16-preparing"]?"Preparing native model files…":[state isEqual:@"bf16-error"]?"Not enough free disk space for this package. Free space and retry.":"Downloaded · verified");
+                    if([state isEqual:@"bf16-ready"]){snprintf(localModels.selected,40,"nemotron-3.5-bf16-ssd");localModels.models[0].selected=NO;localModels.models[1].selected=NO;localModels.models[5].selected=YES;}
+                }
+                if([state hasPrefix:@"q8-"]){
+                    [controller setValue:@8 forKey:@"nemotronBits"];
+                    localModels.models[4].state=[state isEqual:@"q8-ready"]?ASCOLTO_MODEL_READY:ASCOLTO_MODEL_DOWNLOADING;
+                    localModels.models[4].transferred=9000000000ULL;
+                }
                 snprintf(localModels.active,40,"%s",[state isEqual:@"recording"]?"whisper-turbo-q5":"");localModels.models[1].active=[state isEqual:@"recording"];localModels.revision++;
-                [controller.window.appearance performAsCurrentDrawingAppearance:^{[controller buildPage];[controller.window displayIfNeeded];NSView *view=controller.window.contentView;NSBitmapImageRep *rep=[view bitmapImageRepForCachingDisplayInRect:view.bounds];[view cacheDisplayInRect:view.bounds toBitmapImageRep:rep];NSString *name=[NSString stringWithFormat:@"local-models-%@-%@.png",theme,state];NSCAssert([[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:[directory stringByAppendingPathComponent:name] atomically:YES],@"Local model preview must render");}];
+                [controller.window.appearance performAsCurrentDrawingAppearance:^{[controller buildPage];if([state hasPrefix:@"nemotron-"]||[state hasPrefix:@"bf16-"]||[state hasPrefix:@"q8-"]){NSView *rows=[controller valueForKey:@"localRows"];[rows scrollRectToVisible:NSMakeRect(0,0,rows.bounds.size.width,88)];} [controller.window displayIfNeeded];NSView *view=controller.window.contentView;NSBitmapImageRep *rep=[view bitmapImageRepForCachingDisplayInRect:view.bounds];[view cacheDisplayInRect:view.bounds toBitmapImageRep:rep];NSString *name=[NSString stringWithFormat:@"local-models-%@-%@.png",theme,state];NSCAssert([[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:[directory stringByAppendingPathComponent:name] atomically:YES],@"Local model preview must render");}];
             }
+        }
+        [controller setValue:@0 forKey:@"transcriptionTab"];
+        [controller setValue:@8 forKey:@"nemotronBits"]; [controller buildPage];
+        for(NSNumber* bits in @[@8,@16,@8]) {
+            NSView* rows=[controller valueForKey:@"localRows"];
+            NSSegmentedControl* precision=nil; int headings=0;
+            for(NSView* child in rows.subviews) {
+                if([child.identifier isEqual:@"nemotronPrecision"]) precision=(NSSegmentedControl*)child;
+                if([child isKindOfClass:NSTextField.class] && [[(NSTextField*)child stringValue] isEqual:@"Nemotron 3.5 Transcribe"]) headings++;
+            }
+            NSCAssert(headings==1 && precision.segmentCount==2,@"One Nemotron card with two precisions");
+            precision.selectedSegment=bits.intValue==8?0:1;
+            [NSApp sendAction:precision.action to:precision.target from:precision];
+            NSString* suffix=[@":" stringByAppendingString:@(ascolto_nemotron_id(bits.intValue))];
+            BOOL matchingAction=NO;
+            for(NSView* child in rows.subviews) if([child isKindOfClass:NSButton.class] && [child.identifier hasSuffix:suffix]) matchingAction=YES;
+            NSCAssert(matchingAction,@"Actions follow the displayed precision");
+            NSCAssert(!strcmp(localModels.selected,"whistle"),@"Browsing precision does not activate a model");
         }
         [controller.window orderOut:nil];
         puts("Native AppKit Settings preview: PASS (all categories, provider profiles, light/dark; no credentials or network)");

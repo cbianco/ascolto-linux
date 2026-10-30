@@ -5,6 +5,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <math.h>
+#include <sqlite3.h>
 
 /* No microphone is opened by this test. */
 void ascolto_macos_capture_finish_session(ascolto_macos_capture_t *capture, uint64_t generation) {
@@ -53,6 +54,15 @@ int main(void) {
         stat(config.control_socket, &socket_info);
         if ((socket_info.st_mode & 0777) != 0600) failures++;
         if (ascolto_control_start(app, actions)) failures++;
+        /* Content-free capture/model diagnostics must stay readable even while
+           session preparation or inference owns the processing lock. */
+        app->vad_mic.total_samples_processed = 320;
+        app->vad_sys.total_samples_processed = 640;
+        app->capture_dropped_samples = 160;
+        app->transcription_error = true;
+        app->last_mic_rms_db = -25;
+        app->last_sys_rms_db = -30;
+        ascolto_live_app_on_mic_hardware_change(app, true, "Test input");
         pthread_mutex_lock(&app->lock);
         __block NSDictionary *mutation;
         dispatch_group_t clients = dispatch_group_create();
@@ -64,12 +74,63 @@ int main(void) {
         NSDictionary *snapshot = query(config.control_socket, "STATUS\n");
         double milliseconds = (CFAbsoluteTimeGetCurrent() - started) * 1000;
         if (![snapshot[@"ok"] boolValue] || milliseconds > 100) failures++;
+        if (![snapshot[@"mic_active"] boolValue] || ![snapshot[@"transcription_error"] boolValue] ||
+            [snapshot[@"mic_samples"] longLongValue] != 320 || [snapshot[@"sys_samples"] longLongValue] != 640 ||
+            [snapshot[@"capture_dropped_samples"] longLongValue] != 160 ||
+            [snapshot[@"mic_rms_db"] doubleValue] != -25 || [snapshot[@"sys_rms_db"] doubleValue] != -30 ||
+            ![snapshot[@"local_model"] isEqualToString:@"whistle"] ||
+            ![snapshot[@"local_model_state"] isEqualToString:@"INCLUDED"] ||
+            [snapshot[@"local_model_loading"] boolValue] ||
+            [snapshot[@"deferred_transcription"][@"enabled"] boolValue]) failures++;
         pthread_mutex_unlock(&app->lock);
         if (dispatch_group_wait(clients, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC))) failures++;
         if (![mutation[@"ok"] boolValue] || ![query(config.control_socket, "STATUS\n")[@"language"] isEqualToString:@"en"]) failures++;
         if ([query(config.control_socket, "SET_LANG invalid\n")[@"ok"] boolValue]) failures++;
+        app->transcription_error = false;
+        app->capture_dropped_samples = 0;
+        ascolto_live_app_on_mic_hardware_change(app, false, "Test input");
         if (![query(config.control_socket, "START\n")[@"recording"] boolValue]) failures++;
         if (![query(config.control_socket, "STOP\n")[@"state"] isEqualToString:@"IDLE"]) failures++;
+        if ([query(config.control_socket, "LOCAL_QUEUE_CANCEL 1\n")[@"ok"] boolValue]) failures++;
+        app->deferred_worker = ascolto_deferred_start(app);
+        if (!app->deferred_worker) failures++;
+        else {
+            ascolto_deferred_snapshot_t queue = {0};
+            for (int attempt = 0; attempt < 500; ++attempt) {
+                ascolto_deferred_snapshot(app->deferred_worker, &queue);
+                if (queue.available || queue.error_code[0]) break;
+                usleep(10000);
+            }
+            if (!queue.available) failures++;
+            /* Neither STATUS nor queue command enqueueing may wait for a
+               transcription/session lock or a busy database writer. */
+            ascolto_db_t *writer = NULL;
+            if (ascolto_storage_open(config.config_path, &writer)) failures++;
+            else {
+                if (sqlite3_exec(ascolto_db_sqlite(writer), "BEGIN IMMEDIATE", NULL, NULL, NULL)) failures++;
+                pthread_mutex_lock(&app->lock);
+                CFAbsoluteTime queue_started = CFAbsoluteTimeGetCurrent();
+                NSDictionary *queued_snapshot = query(config.control_socket, "STATUS\n");
+                NSDictionary *cancel = query(config.control_socket, "LOCAL_QUEUE_CANCEL 999\n");
+                NSDictionary *retry = query(config.control_socket, "LOCAL_QUEUE_RETRY 999\n");
+                double queue_ms = (CFAbsoluteTimeGetCurrent() - queue_started) * 1000;
+                NSDictionary *deferred = queued_snapshot[@"deferred_transcription"];
+                if (queue_ms > 100 || ![queued_snapshot[@"ok"] boolValue] ||
+                    ![deferred[@"enabled"] boolValue] || ![deferred[@"available"] boolValue] ||
+                    !deferred[@"state"] || !deferred[@"processed_frames"] || !deferred[@"queued_count"] ||
+                    !deferred[@"failed_count"] || !deferred[@"cancel_job_id"] || !deferred[@"retry_job_id"] ||
+                    ![cancel[@"ok"] boolValue] || ![retry[@"ok"] boolValue]) failures++;
+                pthread_mutex_unlock(&app->lock);
+                sqlite3_exec(ascolto_db_sqlite(writer), "ROLLBACK", NULL, NULL, NULL);
+                ascolto_db_close(writer);
+                printf("macOS deferred queue snapshot/commands during locked processing/storage: %.2f ms\n", queue_ms);
+            }
+            if ([query(config.control_socket, "LOCAL_QUEUE_CANCEL\n")[@"ok"] boolValue] ||
+                [query(config.control_socket, "LOCAL_QUEUE_RETRY -1\n")[@"ok"] boolValue] ||
+                [query(config.control_socket, "LOCAL_QUEUE_RETRY 9junk\n")[@"ok"] boolValue]) failures++;
+            ascolto_deferred_stop(app->deferred_worker);
+            app->deferred_worker = NULL;
+        }
         ascolto_control_stop(control);
         if (!access(config.control_socket, F_OK)) failures++;
         FILE *file = fopen(config.control_socket, "w");

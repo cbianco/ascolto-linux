@@ -192,3 +192,27 @@ including after switching apps or minimizing. Dock reopen restores that same
 window. Closing it returns Ascolto to menu-bar-only operation.
 See [the implemented design](design/activity-diagnostics.md) for state semantics,
 privacy boundaries, cancellation limits and verification.
+
+## macOS post-call local queue
+
+The recording header describes audio capture and makes clear that transcription
+runs after the call. A separate local-queue submenu shows copied progress,
+queued/failed counts and Cancel/Resume actions. Model preparation never disables
+recording controls in this mode. Recording settings distinguish temporary PCM
+(required until processing succeeds) from retention of the final compressed
+archive. The Linux live UI retains its native behavior.
+
+Historical macOS calls expose **Transcribe again…** next to **Open transcript**
+in Activity's Transcription section. The native sheet offers installed models,
+the saved language, **Add to queue** and **Manage models…**. It explicitly preserves
+previous transcripts and the original recording. Missing audio is explained next
+to the disabled action. Version entries remain within the same call, showing
+model, date, processing state/progress and an independent transcript link.
+Preparation/decode runs off-main; closing the window cancels only uncommitted
+preparation. Existing persistent queue controls manage committed version jobs.
+
+Nemotron is one model card with a native **8 bit / 16 bit** selector.
+The selector only changes which package is displayed. State, size, download,
+cancel, removal and explicit Use model follow that variant. The saved model
+stays separate. Activity's retranscription sheet groups the family similarly,
+with unavailable variants disabled and Manage models available.

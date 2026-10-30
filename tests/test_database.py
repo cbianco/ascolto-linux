@@ -45,6 +45,49 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(self.scalar('SELECT enabled FROM transcription_preferences'), 0)
         self.assertEqual(self.scalar('SELECT cloud_audio_opt_in FROM transcription_preferences'), 0)
 
+    def test_version_one_migration_preserves_rows_and_private_backup(self):
+        path = self.root / "version-one.sqlite3"
+        schema = Path(storage.__file__).with_name('database_schema.sql').read_text()
+        with sqlite3.connect(path) as source:
+            source.executescript(schema.split('-- Native deferred transcription schema version 2.')[0])
+            source.execute('INSERT INTO schema_migrations VALUES(1,0)')
+            source.execute(f'PRAGMA application_id={storage.APPLICATION_ID}')
+            source.execute('PRAGMA user_version=1')
+            source.execute("INSERT INTO sessions(id,started_at_ms,state,capture_backend) VALUES(17,1000,'completed','test')")
+            source.execute("INSERT INTO utterances(session_id,channel,start_ms,end_ms,text) VALUES(17,'MIC',0,10,'Keep original')")
+        with storage.Database(path) as migrated:
+            self.assertEqual(migrated.connection.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertEqual(migrated.connection.execute('SELECT text FROM utterances').fetchone()[0], 'Keep original')
+            self.assertEqual(migrated.connection.execute('SELECT version FROM schema_migrations ORDER BY version').fetchall()[0][0], 1)
+            self.assertEqual(migrated.connection.execute('SELECT count(*) FROM native_transcription_jobs').fetchone()[0], 0)
+        backups = [p for p in self.root.glob(path.name + '.schema-v1-backup-*') if not p.name.endswith(('-wal', '-shm'))]
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+        with sqlite3.connect(f'file:{backups[0]}?mode=ro', uri=True) as backup:
+            self.assertEqual(backup.execute('PRAGMA user_version').fetchone()[0], 1)
+            self.assertEqual(backup.execute('SELECT text FROM utterances').fetchone()[0], 'Keep original')
+        with storage.Database(path):
+            pass
+        self.assertEqual(len([p for p in self.root.glob(path.name + '.schema-v1-backup-*') if not p.name.endswith(('-wal', '-shm'))]), 1)
+
+    def test_failed_version_one_migration_rolls_back_schema(self):
+        path = self.root / "migration-failure.sqlite3"
+        schema_path = Path(storage.__file__).with_name('database_schema.sql')
+        schema = schema_path.read_text()
+        with sqlite3.connect(path) as source:
+            source.executescript(schema.split('-- Native deferred transcription schema version 2.')[0])
+            source.execute('INSERT INTO schema_migrations VALUES(1,0)')
+            source.execute(f'PRAGMA application_id={storage.APPLICATION_ID}')
+            source.execute('PRAGMA user_version=1')
+        with patch.object(Path, 'read_text', return_value=schema + '\nINVALID MIGRATION;\n'):
+            with self.assertRaises(sqlite3.DatabaseError):
+                storage.Database(path)
+        with sqlite3.connect(path) as source:
+            self.assertEqual(source.execute('PRAGMA user_version').fetchone()[0], 1)
+            self.assertEqual(source.execute("SELECT count(*) FROM sqlite_master WHERE name='native_transcription_jobs'").fetchone()[0], 0)
+        with storage.Database(path) as recovered:
+            self.assertEqual(recovered.connection.execute('PRAGMA user_version').fetchone()[0], 2)
+
     def test_native_schema_is_current(self):
         subprocess.run([sys.executable, str(Path(storage.__file__).with_name('generate_database_schema.py')), '--check'], check=True)
 

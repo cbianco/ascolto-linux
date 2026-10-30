@@ -99,6 +99,69 @@
           "source_url": "https://huggingface.co/Qwen/Qwen3-ASR-1.7B/resolve/7278e1e70fe206f11671096ffdd38061171dd6e5/vocab.json"
         }
       ]
+    },
+    {
+      "id": "nemotron-3.5-q8",
+      "name": "Nemotron 3.5 Transcribe Q8_0",
+      "license": "OpenMDW-1.1",
+      "files": [
+        {
+          "filename": "decoder.gguf",
+          "bytes": 35004643232,
+          "sha256": "3d99075b58f15153d87e8922f54e12dda818bbb505c2e0d7d50cd4f30beac9f2",
+          "source_url": "https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF/resolve/dbd06c5cad7a2f33c8e06be2fb3ef814dbd9aa59/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-Q8_0.gguf"
+        },
+        {
+          "filename": "encoder.gguf",
+          "bytes": 1670410080,
+          "sha256": "4221029c8a565c4a80c507ffa760c716e595acf663f9f4273ce69910050e7ba2",
+          "source_url": "https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF/resolve/dbd06c5cad7a2f33c8e06be2fb3ef814dbd9aa59/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-Encoder-F16.gguf"
+        },
+        {
+          "filename": "LICENSE",
+          "bytes": 2694,
+          "sha256": "18c3a96fd1ee779263aa9210e3d962d5899511890254f3f3efd70ece81d89866",
+          "source_url": "https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF/resolve/dbd06c5cad7a2f33c8e06be2fb3ef814dbd9aa59/LICENSE"
+        }
+      ]
+    },
+    {
+      "id": "nemotron-3.5-bf16-ssd",
+      "name": "Nemotron 3.5 Transcribe BF16 SSD",
+      "license": "OpenMDW-1.1",
+      "files": [
+        {
+          "filename": "model.safetensors",
+          "bytes": 67496013734,
+          "sha256": "03142dde5176c1d4df21ee829642745a1d670ea4d79e1a4684c64d53195acff2",
+          "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B/resolve/a99e33f698257b8b69ca7834f19c73582eb1fa7e/model.safetensors"
+        },
+        {
+          "filename": "LICENSE",
+          "bytes": 2694,
+          "sha256": "18c3a96fd1ee779263aa9210e3d962d5899511890254f3f3efd70ece81d89866",
+          "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B/resolve/a99e33f698257b8b69ca7834f19c73582eb1fa7e/LICENSE"
+        }
+      ],
+      "installed_files": [
+        {
+          "filename": "decoder.gguf",
+          "bytes": 63181504832,
+          "sha256": "c73adfea49a9a1ab3543e68aa0d66af5c5d4d4d709f67b031f414e4bc40ac7a4"
+        },
+        {
+          "filename": "encoder.gguf",
+          "bytes": 2934467328,
+          "sha256": "45c136bb89ff31ea17c844c3ead34d65be9bf3735cbe7b4761f3671ab5079742"
+        },
+        {
+          "filename": "LICENSE",
+          "bytes": 2694,
+          "sha256": "18c3a96fd1ee779263aa9210e3d962d5899511890254f3f3efd70ece81d89866"
+        }
+      ],
+      "preparation_bytes": 66115972160,
+      "preparation_recipe_sha256": "05cd4b01e6fe54390b275703173ef58c5436451a58fe7d93407152a0ec0be03c"
     }
   ]
 }

@@ -3,6 +3,8 @@
 #include "ascolto/filesystem.h"
 #include "ascolto/json.h"
 #include "ascolto/storage.h"
+#include "ascolto/deferred_store.h"
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -32,9 +34,13 @@ static char *session_metadata(ascolto_live_app_t *app, bool manual,
         (long long)app->capture_padded_samples[0],
         (long long)app->capture_padded_samples[1]);
   fprintf(out, ",\"local_model\":\"%s\",\"transcription_failed\":%s", app->local_stt.id, app->transcription_error ? "true" : "false");
+  fprintf(out, ",\"post_call\":%s,\"retain_audio\":%s,\"cloud_recap\":%s,\"recap_tts\":%s",
+          app->deferred_worker ? "true" : "false", app->files.retain_audio ? "true" : "false",
+          app->config.cloud_recap ? "true" : "false", app->config.recap_tts ? "true" : "false");
+  fprintf(out, ",\"audio_write_failed\":%s", app->files.storage_error ? "true" : "false");
   const char *keys[] = {"mic",          "in_app",         "out_app",
                         "window_title", "calendar_title", "calendar_organizer",
-                        "attendees",    "calendar_notes", "audio_m4a"};
+                        "attendees",    "calendar_notes", "audio_m4a", "transcript_md", "recap_python"};
   const char *values[] = {app->active_mic_name,
                           app->active_in_apps,
                           app->active_out_apps,
@@ -43,7 +49,7 @@ static char *session_metadata(ascolto_live_app_t *app, bool manual,
                           app->call_meta.calendar_organizer,
                           app->call_meta.calendar_attendees,
                           app->call_meta.calendar_notes,
-                          app->files.save_audio ? app->files.m4a_path : ""};
+                          app->files.save_audio ? app->files.m4a_path : "", app->files.md_path, app->config.recap_python};
   for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
     fprintf(out, ",\"%s\":", keys[i]);
     ascolto_write_json_string(out, values[i]);
@@ -68,7 +74,8 @@ int ascolto_transcript_open(ascolto_live_app_t *app, bool manual) {
   snprintf(app->files.sys_raw_path, sizeof(app->files.sys_raw_path), "%s/Audio/.sys.f32", directory);
   snprintf(app->files.m4a_path, sizeof(app->files.m4a_path), "%s/Audio/recording.m4a", directory);
 
-  app->files.save_audio = app->config.save_audio || app->config.cloud_recap;
+  app->files.retain_audio = app->config.save_audio || app->config.cloud_recap;
+  app->files.save_audio = app->files.retain_audio || app->deferred_worker;
   char keywords[4096];
   ascolto_config_load_keywords(&app->config, keywords, sizeof(keywords));
   char *vocabulary = ascolto_storage_vocabulary(keywords);
@@ -96,15 +103,53 @@ int ascolto_transcript_open(ascolto_live_app_t *app, bool manual) {
     return -1;
   }
   if (app->files.save_audio) {
-    app->files.mic_raw = fopen(app->files.mic_raw_path, "wb");
-    app->files.sys_raw = fopen(app->files.sys_raw_path, "wb");
+    int mic_fd = open(app->files.mic_raw_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    int sys_fd = open(app->files.sys_raw_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    app->files.mic_raw = mic_fd >= 0 ? fdopen(mic_fd, "wb") : NULL;
+    app->files.sys_raw = sys_fd >= 0 ? fdopen(sys_fd, "wb") : NULL;
+    if (mic_fd >= 0 && !app->files.mic_raw) close(mic_fd);
+    if (sys_fd >= 0 && !app->files.sys_raw) close(sys_fd);
+    if (!app->files.mic_raw || !app->files.sys_raw) {
+      if (app->files.mic_raw) fclose(app->files.mic_raw);
+      if (app->files.sys_raw) fclose(app->files.sys_raw);
+      app->files.mic_raw = app->files.sys_raw = NULL;
+      app->files.storage_error = SQLITE_IOERR;
+      ascolto_storage_state(app->config.config_path, app->files.database_session, "failed", NULL);
+      return -1;
+    }
     if (app->files.mic_raw)
       chmod(app->files.mic_raw_path, 0600);
     if (app->files.sys_raw)
       chmod(app->files.sys_raw_path, 0600);
-    ascolto_storage_artifact(app->config.config_path,
+    if (app->files.retain_audio) ascolto_storage_artifact(app->config.config_path,
                              app->files.database_session, "audio_m4a",
                              app->files.m4a_path, "pending");
+  }
+  if (app->deferred_worker) {
+    /* Freeze interpretation and output preferences before the first captured frame. */
+    size_t used = strlen(keywords);
+    for (const char *p = app->call_meta.calendar_attendees; *p && used + 2 < sizeof(keywords); p++) {
+      if (p == app->call_meta.calendar_attendees && used) keywords[used++] = '\n';
+      keywords[used++] = *p == ',' ? '\n' : *p;
+    }
+    keywords[used] = 0;
+    metadata = session_metadata(app, manual, -1);
+    ascolto_deferred_store_t *store = NULL;
+    rc = metadata ? ascolto_deferred_store_open(app->config.config_path, &store) : SQLITE_NOMEM;
+    ascolto_deferred_enqueue_t job = {.session_id = app->files.database_session,
+      .model_id = app->local_stt.id, .language = app->config.language, .keywords = keywords,
+      .mic_path = app->files.mic_raw_path, .sys_path = app->files.sys_raw_path,
+      .diarizer_threshold = app->config.diarizer_threshold, .metadata_json = metadata};
+    if (!rc) rc = ascolto_deferred_record(store, &job, &app->files.deferred_job);
+    ascolto_deferred_store_close(store);
+    free(metadata);
+    if (rc) {
+      fclose(app->files.mic_raw); fclose(app->files.sys_raw);
+      app->files.mic_raw = app->files.sys_raw = NULL;
+      app->files.storage_error = rc;
+      ascolto_storage_state(app->config.config_path, app->files.database_session, "failed", NULL);
+      return -1;
+    }
   }
   return 0;
 }
@@ -147,15 +192,17 @@ void ascolto_transcript_write_turn(ascolto_live_app_t *app,
 
 void ascolto_transcript_close(ascolto_live_app_t *app, double elapsed) {
   if (app->files.mic_raw) {
-    fclose(app->files.mic_raw);
+    if (fflush(app->files.mic_raw) || fsync(fileno(app->files.mic_raw))) app->files.storage_error = SQLITE_IOERR;
+    if (fclose(app->files.mic_raw)) app->files.storage_error = SQLITE_IOERR;
     app->files.mic_raw = NULL;
   }
   if (app->files.sys_raw) {
-    fclose(app->files.sys_raw);
+    if (fflush(app->files.sys_raw) || fsync(fileno(app->files.sys_raw))) app->files.storage_error = SQLITE_IOERR;
+    if (fclose(app->files.sys_raw)) app->files.storage_error = SQLITE_IOERR;
     app->files.sys_raw = NULL;
   }
-  app->files.storage_error = ascolto_storage_flush(app->config.config_path,
-                                                   &app->files.storage_writer);
+  int flush_rc = ascolto_storage_flush(app->config.config_path, &app->files.storage_writer);
+  if (flush_rc) app->files.storage_error = flush_rc;
   char *metadata = session_metadata(app, app->manual_override_active, elapsed);
   int rc = ascolto_storage_state(
       app->config.config_path, app->files.database_session,
@@ -163,6 +210,18 @@ void ascolto_transcript_close(ascolto_live_app_t *app, double elapsed) {
   free(metadata);
   if (rc)
     app->files.storage_error = rc;
+  if (app->deferred_worker && app->files.deferred_job) {
+    ascolto_deferred_store_t *store = NULL;
+    rc = ascolto_deferred_store_open(app->config.config_path, &store);
+    if (!rc && !app->files.storage_error)
+      rc = ascolto_deferred_seal(store, app->files.deferred_job, (int64_t)(elapsed * ASCOLTO_SAMPLE_RATE + 0.5));
+    else if (!rc)
+      rc = ascolto_deferred_finish(store, app->files.deferred_job, "failed", "audio_write_failed");
+    ascolto_deferred_store_close(store);
+    if (rc) app->files.storage_error = rc;
+    ascolto_deferred_wake(app->deferred_worker);
+    return;
+  }
   bool use_ai = ascolto_ai_automatic_enabled(app->config.config_path);
   if (!app->files.storage_error && !app->transcription_error && app->session_utterance_count > 0)
     ascolto_ai_recap_start(app->config.config_path, app->files.md_path, true);
