@@ -101,16 +101,22 @@ remote dependencies. Source call names and paths are omitted from the public
 corpus view, but the report is still private because it contains audio/text.
 
 ```sh
+npm install --prefix build/stt-bench/browser-check --no-save --package-lock=false playwright@1.62.1
+build/stt-bench/browser-check/node_modules/.bin/playwright install chromium
 python3 tools/stt-bench/build_report.py \
   --output reports/local-stt-2026-10-16
-node tools/stt-bench/check_report.cjs \
+NODE_PATH="$PWD/build/stt-bench/browser-check/node_modules" \
+  node tools/stt-bench/check_report.cjs \
   reports/local-stt-2026-10-16/report.html build/stt-bench/qa
 ```
 
-The browser check uses the desktop's bundled Playwright dependency path; adapt
-that import when running elsewhere. It verifies desktop/narrow/mobile widths,
-finite chart geometry, document overflow, filters, empty selections, embedded
-audio metadata and JavaScript errors. Screenshots support manual visual review.
+The browser check resolves Playwright through standard Node.js module resolution.
+The setup above keeps the optional package in ignored `build/`; an existing
+installation can also be used through the normal module search path or
+`NODE_PATH`. Chromium must be installed for the selected Playwright version.
+The check verifies desktop/narrow/mobile widths, finite chart geometry, document
+overflow, filters, empty selections, embedded audio metadata and JavaScript
+errors. Screenshots support manual visual review.
 
 ## Optional user-authorized cloud reference
 

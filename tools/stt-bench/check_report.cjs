@@ -1,7 +1,7 @@
 /* Browser verification for the standalone report, including narrow screens. */
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('/Users/cristianbianco/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const { chromium } = require('playwright');
 (async () => {
   const report = path.resolve(process.argv[2]);
   const output = path.resolve(process.argv[3]);
