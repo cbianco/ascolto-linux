@@ -5,7 +5,7 @@ adds five optional local packages. Nemotron variants share one card with a
 8 / 16-bit selector; browsing does not activate or download a variant. Downloading verifies every manifest artifact
 before publication and does not activate it. Use model saves an independent
 next-session preference. A running session keeps its decoder until its final
-queued audio and VAD turns have drained.
+queued audio requests have drained.
 
 | Engine | Complete download | Runtime | Initial text API |
 | --- | --- | --- | --- |
@@ -16,13 +16,26 @@ queued audio and VAD turns have drained.
 | Nemotron 3.5 Transcribe Q8_0 SSD | 36,675,056,006 bytes | Native NeMo decoder with bounded SSD cache | Completed mono turn |
 | Nemotron 3.5 Transcribe BF16 SSD | 67,496,016,428 bytes; 66,115,974,854 installed | Native NeMo decoder with bounded SSD cache | Completed mono turn; experimental high delay |
 
-Optional decoders receive the same gated, VAD-completed 16 kHz mono turns as
-Whistle. SYS precedes MIC, processing stays serialized, and capture only enqueues.
-Whistle continues to extract speaker embeddings. These first adapters return
-text and a language only when available. No word timestamps, probabilities or
-first-token measurements are fabricated. Existing lexical echo and repetition
-filters still run; silence never bypasses the production gate/VAD. Parakeet uses
-automatic language detection and does not apply custom keyword prompts.
+All decoders receive contiguous, original 16 kHz mono audio requests of at most
+30 seconds. Every sample reaches the model, including quiet onsets, short replies,
+silence, simultaneous speech and the final partial request. SYS precedes MIC and
+processing stays serialized; capture only enqueues. Whistle extracts speaker
+embeddings independently. These adapters return text and a language when available.
+No word timestamps, probabilities or first-token measurements are fabricated.
+There are no application energy/echo gates or lexical/hallucination/repetition
+filters. Every nonempty model result is retained verbatim. Playback echo and model
+hallucinations can therefore remain visible rather than being silently removed.
+Parakeet uses automatic language detection and does not apply keyword prompts.
+
+The 30-second transport bound is not sentence segmentation. A sentence or a
+speaker change can cross a request boundary. The application neither invents
+word timing for stitching nor heuristically deduplicates text. Speaker identity
+is still inferred from each request's embedding; a mixed-speaker request cannot
+provide reliable word-level attribution.
+Inference also runs on silent channels, so its cost follows the full recorded
+duration. Linux live results can wait up to one 30-second request plus inference;
+the macOS production path remains post-call. A transport test passing does not
+establish recognition accuracy across request boundaries or mixed-speaker quality.
 
 Whisper and Parakeet use Metal/CPU on macOS and CPU on Linux. Qwen uses native C
 with Accelerate on macOS and OpenBLAS on Linux. Recognition uses `ascolto_stt_get_api`, the versioned C ABI. The BF16 adapter
@@ -44,7 +57,7 @@ The adapter uses one decoder slot, a 4,096-token context, a 512-token prefill ba
 and one encoder window per batch. Speculative decoding is disabled. Greedy output
 must finish its turn and fit the text API; exhausted generation/context fails
 instead of committing truncated text. Finite mono 16 kHz audio is limited to
-60 seconds per request; production VAD uses shorter turns. Language hints and
+60 seconds per request; the shared transport uses at most 30 seconds. Language hints and
 vocabulary prompts are supported. Whistle continues to own speaker identity.
 CUDA embedding remains disabled because the pinned upstream allocation failures
 can terminate the process rather than returning an inference error.
@@ -132,7 +145,7 @@ make bin/ascolto-local-stt-runtime bin/ascolto-local-stt-pipeline
 These macOS tools never capture or upload audio. The runtime check switches
 Whisper → Parakeet → Qwen → Whisper → Parakeet in one process. The production
 check runs on a pthread with a 512 KiB stack, matching the macOS audio consumer,
-and feeds synthetic speech and silence through VAD, the selected ASR, Whistle
+and feeds complete speech and silence requests through the selected ASR, Whistle
 speaker embeddings and SQLite. It also changes the next-session preference while
 each alternative remains active. Install packages according to the manifest's
 filenames under the temporary configuration's `local-models/` directory first.

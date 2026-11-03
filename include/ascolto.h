@@ -292,8 +292,8 @@ typedef struct ascolto_live_app_s {
     struct ascolto_deferred_replay_state *deferred_replay;
     bool transcription_error;
     ascolto_diarizer_t diarizer;
-    ascolto_online_vad_t vad_mic;
-    ascolto_online_vad_t vad_sys;
+    ascolto_audio_chunker_t mic_chunks;
+    ascolto_audio_chunker_t sys_chunks;
 
     ascolto_app_state_t state;
     bool manual_override_active;
@@ -302,13 +302,9 @@ typedef struct ascolto_live_app_s {
     bool sys_audio_permission_ok;
     float last_mic_rms_db;
     float last_sys_rms_db;
-    double last_sys_voiced_stream_s;
 
-    ascolto_echo_filter_t echo;
     float pending_audio[2][ASCOLTO_FRAME_SAMPLES];
     int pending_audio_count[2];
-    int mic_bleed_frames_suppressed;
-    int mic_echo_turns_suppressed;
     int64_t capture_dropped_samples;
     int64_t capture_padded_samples[2];
 
@@ -358,16 +354,6 @@ void ascolto_live_app_feed_audio(
 /* Formats the current status bar title string (e.g. "🎙️ Ascolto" or "🔴 01:23" or "⏸️ Ascolto") */
 void ascolto_live_app_format_statusbar(ascolto_live_app_t* app, char* out_buf, size_t out_cap);
 void ascolto_live_app_read_snapshot(ascolto_live_app_t* app, ascolto_live_snapshot_t* snapshot);
-
-/* Shared ASR hallucination / repetition filter and cross-channel lexical echo detector */
-bool ascolto_is_noise_hallucination(
-    const ascolto_transcript_result_t* tr,
-    ascolto_channel_t channel,
-    float rms_db,
-    bool recent_sys_activity
-);
-
-bool ascolto_is_lexical_echo(const char* mic_text, const char* sys_text);
 
 /* --------------------------------------------------------------------------
  * Real-Time macOS Audio Capture Engine (AudioQueue / CoreAudio)

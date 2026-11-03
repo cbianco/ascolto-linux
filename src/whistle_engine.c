@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "ascolto/whistle_engine.h"
+#include "ascolto/audio_processing.h"
 #include "needle.h"
 #include <ctype.h>
 #include <math.h>
@@ -13,17 +14,17 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-static void extract_json_string(const char *json, const char *key, char *out, size_t out_cap) {
-    if (!out || out_cap == 0) return;
+static bool extract_json_string(const char *json, const char *key, char *out, size_t out_cap) {
+    if (!out || out_cap == 0) return false;
     out[0] = '\0';
-    if (!json || !key) return;
+    if (!json || !key) return false;
     char pat[64];
     snprintf(pat, sizeof(pat), "\"%s\":", key);
     const char *p = strstr(json, pat);
-    if (!p) return;
+    if (!p) return false;
     p += strlen(pat);
     while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') return;
+    if (*p != '"') return false;
     p++;
     size_t j = 0;
     while (*p && *p != '"' && j + 1 < out_cap) {
@@ -38,6 +39,7 @@ static void extract_json_string(const char *json, const char *key, char *out, si
         }
     }
     out[j] = '\0';
+    return *p == '"';
 }
 
 static double extract_json_number(const char *json, const char *key) {
@@ -174,12 +176,14 @@ static int process_segment(
     if (!eng || !pcm || num_samples == 0 || !out_res) return -1;
     memset(out_res, 0, sizeof(*out_res));
 
-    /* Cap at 30 seconds for single-pass Whistle transcribe + embed */
-    size_t max_samples = 30 * ASCOLTO_SAMPLE_RATE;
-    size_t clipped = (num_samples > max_samples) ? max_samples : num_samples;
+    (void)hint_text;
+    /* The caller must bound requests; never silently clip original audio. */
+    if (num_samples > ASCOLTO_TRANSCRIPTION_CHUNK_SECONDS * ASCOLTO_SAMPLE_RATE) return -1;
+    int result = -1;
 
     pthread_mutex_lock(&eng->mutex);
     if (eng->model_loaded) {
+        if (embeddings_only) result = 0;
         const char *lang_arg = NULL;
         if (language && *language && strcmp(language, "auto") != 0) {
             lang_arg = language;
@@ -192,7 +196,7 @@ static int process_segment(
         json_out[0] = '\0';
         int trc = embeddings_only ? -1 : needle_transcribe(
             pcm,
-            (int)clipped,
+            (int)num_samples,
             lang_arg,
             kw_arg,
             1,
@@ -200,17 +204,17 @@ static int process_segment(
             (int)sizeof(json_out)
         );
         if (trc >= 0) {
-            extract_json_string(json_out, "text", out_res->text, sizeof(out_res->text));
+            result = extract_json_string(json_out, "text", out_res->text, sizeof(out_res->text)) ? 0 : -1;
             extract_json_string(json_out, "language", out_res->language, sizeof(out_res->language));
             out_res->ttft_ms = extract_json_number(json_out, "ttft_ms");
             out_res->decode_tps = extract_json_number(json_out, "decode_tps");
         }
 
-        int ecount = needle_embed(NULL, pcm, (int)clipped, NULL, 0);
+        int ecount = needle_embed(NULL, pcm, (int)num_samples, NULL, 0);
         if (ecount > 0) {
             float *ebuf = (float *)malloc((size_t)ecount * sizeof(float));
             if (ebuf) {
-                int got = needle_embed(NULL, pcm, (int)clipped, ebuf, ecount);
+                int got = needle_embed(NULL, pcm, (int)num_samples, ebuf, ecount);
                 if (got == ecount) {
                     out_res->frame_embeddings = ebuf;
                     out_res->frame_embedding_floats = (size_t)ecount;
@@ -223,18 +227,7 @@ static int process_segment(
     }
     pthread_mutex_unlock(&eng->mutex);
 
-    /* If synthetic voice fixture was provided with hint_text and Whistle decoded empty text on formants,
-       preserve hint_text so deterministic multi-speaker E2E tests verify full pipeline while still using
-       real Whistle encoder embeddings from needle_embed(). */
-    if (out_res->text[0] == '\0' && hint_text && *hint_text) {
-        snprintf(out_res->text, sizeof(out_res->text), "%s", hint_text);
-        if (out_res->language[0] == '\0') {
-            snprintf(out_res->language, sizeof(out_res->language), "%s",
-                     (language && *language && strcmp(language, "auto") != 0) ? language : "it");
-        }
-    }
-
-    return 0;
+    return result;
 }
 
 int ascolto_whistle_process_segment(ascolto_whistle_engine_t *eng, const float *pcm, size_t n,

@@ -67,7 +67,7 @@ static void process_and_commit_utterance_unlocked(
     double end_sec,
     const char *hint_text
 ) {
-    if (!core || !pcm || num_samples < (ASCOLTO_SAMPLE_RATE / 4) || core->transcription_error) return;
+    if (!core || !pcm || !num_samples || core->transcription_error) return;
 
     char lang[16];
     char keywords[1024];
@@ -76,16 +76,21 @@ static void process_and_commit_utterance_unlocked(
     snprintf(keywords, sizeof(keywords), "%s", core->config.keywords);
     pthread_mutex_unlock(&core->mutex);
 
-    ascolto_whistle_result_t wres;
+    ascolto_whistle_result_t wres = {0};
     if (core->local_stt.context) {
         ascolto_stt_text_t text;
         if (ascolto_local_stt_transcribe(core->local_models, &core->local_stt, pcm,
             (int)num_samples, lang, keywords, &text)) { core->transcription_error = true; return; }
-        ascolto_whistle_embed_segment(&core->whistle, pcm, num_samples, &wres);
+        if (text.text[0]) ascolto_whistle_embed_segment(&core->whistle, pcm, num_samples, &wres);
         snprintf(wres.text, sizeof(wres.text), "%s", text.text);
         snprintf(wres.language, sizeof(wres.language), "%s", text.language);
     } else {
-        ascolto_whistle_process_segment(&core->whistle, pcm, num_samples, lang, keywords, hint_text, &wres);
+        int result = ascolto_whistle_process_segment(&core->whistle, pcm, num_samples, lang, keywords, NULL, &wres);
+        if (result && !core->audio.use_mock) {
+            ascolto_whistle_result_free(&wres);
+            core->transcription_error = true;
+            return;
+        }
     }
 
     /* Mock IPC speech is a formant fixture, not a recording of spoken words.
@@ -95,19 +100,6 @@ static void process_and_commit_utterance_unlocked(
     if (wres.text[0] == '\0') {
         ascolto_whistle_result_free(&wres);
         return;
-    }
-
-    float turn_db = ascolto_audio_rms_db(pcm, (int)num_samples);
-    bool recent_sys = core->last_sys_voiced_sample >= 0 &&
-        core->vad[ASCOLTO_CHANNEL_SYS].total_samples_processed - core->last_sys_voiced_sample < 35200;
-    ascolto_mic_activity_t activity = core->echo.mic;
-    if (channel == ASCOLTO_CHANNEL_MIC) activity = ascolto_mic_activity_take(&core->echo.mic);
-    bool reject = ascolto_transcript_is_noise(wres.text, 0, 1.0f, channel, turn_db, recent_sys);
-    if (channel == ASCOLTO_CHANNEL_MIC &&
-        ascolto_echo_filter_matches(&core->echo, wres.text, start_sec, end_sec, turn_db, &activity)) reject = true;
-    if (reject) { ascolto_whistle_result_free(&wres); return; }
-    if (channel == ASCOLTO_CHANNEL_SYS) {
-        ascolto_echo_filter_remember(&core->echo, wres.text, start_sec, end_sec, turn_db);
     }
 
     float emb[ASCOLTO_EMBED_DIM];
@@ -186,13 +178,13 @@ static void process_and_commit_utterance_unlocked(
     ascolto_whistle_result_free(&wres);
 }
 
-static void on_vad_turn(ascolto_channel_t channel, const float *pcm, int count,
+static void on_audio_chunk(ascolto_channel_t channel, const float *pcm, int count,
     double start, double end, float rms_db, void *context) {
     (void)rms_db;
     ascolto_core_t *core = context;
     char hint[512];
-    snprintf(hint, sizeof(hint), "%s", core->vad_hint[channel]);
-    core->vad_hint[channel][0] = '\0';
+    snprintf(hint, sizeof(hint), "%s", core->chunk_hint[channel]);
+    core->chunk_hint[channel][0] = '\0';
     process_and_commit_utterance_unlocked(core, channel, pcm, (size_t)count, start, end,
                                         hint[0] ? hint : NULL);
 }
@@ -200,8 +192,8 @@ static void on_vad_turn(ascolto_channel_t channel, const float *pcm, int count,
 void ascolto_core_flush_channel(ascolto_core_t *core, ascolto_channel_t channel) {
     if (!core || channel < 0 || channel > ASCOLTO_CHANNEL_SYS) return;
     pthread_mutex_lock(&core->processing_mutex);
-    ascolto_online_vad_flush(&core->vad[channel], on_vad_turn, core);
-    core->vad_hint[channel][0] = '\0';
+    ascolto_audio_chunker_flush(&core->chunks[channel], on_audio_chunk, core);
+    core->chunk_hint[channel][0] = '\0';
     pthread_mutex_unlock(&core->processing_mutex);
 }
 
@@ -254,13 +246,11 @@ static int start_session_unlocked(ascolto_core_t *core, ascolto_state_t target_s
     ascolto_diarizer_set_sensitivity(&core->diarizer, core->config.diarization_sensitivity);
 
     for (int ch = 0; ch < 2; ch++) {
-        ascolto_online_vad_reset(&core->vad[ch]);
-        core->vad_hint[ch][0] = '\0';
+        ascolto_audio_chunker_reset(&core->chunks[ch]);
+        core->chunk_hint[ch][0] = '\0';
         core->session_audio_sec[ch] = 0.0;
     }
 
-    ascolto_echo_filter_reset(&core->echo);
-    core->last_sys_voiced_sample = -1;
     core->session_start_ms = ascolto_monotonic_ms();
     core->session_paused_accum_ms = 0;
     core->pause_start_ms = 0;
@@ -403,11 +393,8 @@ int ascolto_core_init(ascolto_core_t *core, const ascolto_config_t *cfg, bool us
     pthread_cond_init(&core->session_condition, NULL);
 
     for (int ch = 0; ch < 2; ch++) {
-        ascolto_vad_config_t vad_config = ascolto_vad_default_config();
-        vad_config.energy_threshold_db = ch == ASCOLTO_CHANNEL_MIC ? -35.5f : -35.0f;
-        vad_config.max_segment_s = 10.0;
-        if (ascolto_online_vad_init(&core->vad[ch], (ascolto_channel_t)ch, &vad_config)) {
-            for (int previous = 0; previous < ch; previous++) ascolto_online_vad_free(&core->vad[previous]);
+        if (ascolto_audio_chunker_init(&core->chunks[ch], (ascolto_channel_t)ch)) {
+            for (int previous = 0; previous < ch; previous++) ascolto_audio_chunker_free(&core->chunks[previous]);
             pthread_cond_destroy(&core->session_condition);
             pthread_mutex_destroy(&core->processing_mutex);
             pthread_mutex_destroy(&core->config_mutex);
@@ -457,7 +444,7 @@ void ascolto_core_destroy(ascolto_core_t *core) {
     ascolto_local_models_destroy(core->local_models);
 
     for (int ch = 0; ch < 2; ch++) {
-        ascolto_online_vad_free(&core->vad[ch]);
+        ascolto_audio_chunker_free(&core->chunks[ch]);
     }
     pthread_cond_destroy(&core->session_condition);
     pthread_mutex_destroy(&core->mutex);
@@ -846,7 +833,7 @@ void ascolto_core_ingest_audio(ascolto_core_t *core, ascolto_channel_t channel,
     ascolto_audio_recorder_t *recorder = core->recorder[channel];
     pthread_mutex_unlock(&core->mutex);
     if (!recording) { pthread_mutex_unlock(&core->processing_mutex); return; }
-    int64_t cursor = core->vad[channel].total_samples_processed;
+    int64_t cursor = core->chunks[channel].total_samples_processed;
     int64_t start = stream_time_sec >= 0 ? llround(stream_time_sec * ASCOLTO_SAMPLE_RATE) : cursor;
     if (start < cursor) {
         int64_t skipped = cursor - start;
@@ -863,29 +850,14 @@ void ascolto_core_ingest_audio(ascolto_core_t *core, ascolto_channel_t channel,
         int step = remaining > ASCOLTO_FRAME_SAMPLES ? ASCOLTO_FRAME_SAMPLES : (int)remaining;
         const float *frame = padding ? zeros : pcm + offset;
         if (recorder) ascolto_audio_recorder_write(recorder, frame, (size_t)step);
-        float db = ascolto_audio_rms_db(frame, step);
-        float reference = -100.0f;
-        bool active = false;
-        if (channel == ASCOLTO_CHANNEL_SYS) {
-            core->echo.sys_db[core->echo.sys_frames++ % ASCOLTO_SYS_ENV_HISTORY] = db;
-            if (db >= -36.5f) core->last_sys_voiced_sample = core->vad[channel].total_samples_processed + step;
-        } else {
-            active = ascolto_bleed_reference(core->echo.sys_db, core->echo.sys_frames,
-                core->vad[channel].total_samples_processed + step, core->vad[ASCOLTO_CHANNEL_SYS].total_samples_processed,
-                &reference);
-        }
-        if (!padding && hint && *hint && !core->vad_hint[channel][0])
-            snprintf(core->vad_hint[channel], sizeof(core->vad_hint[channel]), "%s", hint);
-        bool bleed = channel == ASCOLTO_CHANNEL_MIC && active && db < reference + 3.5f;
-        ascolto_online_vad_feed(&core->vad[channel], bleed ? zeros : frame, step, on_vad_turn, core);
-        if (channel == ASCOLTO_CHANNEL_MIC && !bleed) {
-            ascolto_mic_activity_track(&core->echo.mic, core->vad[channel].in_speech, active, reference);
-        }
+        if (!padding && hint && *hint && !core->chunk_hint[channel][0])
+            snprintf(core->chunk_hint[channel], sizeof(core->chunk_hint[channel]), "%s", hint);
+        ascolto_audio_chunker_feed(&core->chunks[channel], frame, step, on_audio_chunk, core);
         if (padding) gap -= step;
         else offset += (size_t)step;
     }
     pthread_mutex_lock(&core->mutex);
-    core->session_audio_sec[channel] = (double)core->vad[channel].total_samples_processed / ASCOLTO_SAMPLE_RATE;
+    core->session_audio_sec[channel] = (double)core->chunks[channel].total_samples_processed / ASCOLTO_SAMPLE_RATE;
     pthread_mutex_unlock(&core->mutex);
     pthread_mutex_unlock(&core->processing_mutex);
 }

@@ -51,10 +51,8 @@ struct ascolto_core {
     ascolto_segment_t segments[ASCOLTO_MAX_SEGMENTS_MEM];
     size_t segments_count;
 
-    ascolto_online_vad_t vad[2];
-    char vad_hint[2][512];
-    ascolto_echo_filter_t echo;
-    int64_t last_sys_voiced_sample;
+    ascolto_audio_chunker_t chunks[2];
+    char chunk_hint[2][512];
 
     ascolto_whistle_engine_t whistle;
     ascolto_local_models_t *local_models;

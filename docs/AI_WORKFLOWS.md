@@ -123,6 +123,12 @@ means only the independently selected on-device engine. Recap language is a disp
 `language` is an optional ISO-639-1 hint. Omit the STT hint for automatic detection.
 Do not pass the literal value `auto` to the provider.
 
+The legacy `recap.py` STT path also submits every original sample in contiguous
+30-second requests, including silence and final short fragments. It retains
+nonempty model text without greeting/hallucination rejection or cross-channel
+similarity deduplication. Recap-only privacy scrubbing and structured-output
+validation remain independent of speech recognition.
+
 ## Inputs, coverage and output artifacts
 
 `load_turns` accepts the native `start_s/end_s` and Linux `start_sec/end_sec`

@@ -178,13 +178,13 @@ static void save_turn(ascolto_channel_t channel, const float* pcm, int count,
 }
 
 static void drain_pcm(ascolto_capture_buffer_t* buffer, ascolto_live_app_t* app,
-                       ascolto_online_vad_t* vad, turns_t* turns) {
+                       ascolto_audio_chunker_t* vad, turns_t* turns) {
     float mic[320], sys[320];
     int count;
     while ((count = ascolto_capture_buffer_pop(buffer, mic, sys, 320, false)) > 0) {
         ascolto_live_app_feed_audio(app, ASCOLTO_CHANNEL_SYS, sys, count);
         ascolto_live_app_feed_audio(app, ASCOLTO_CHANNEL_MIC, mic, count);
-        ascolto_online_vad_feed(vad, sys, count, save_turn, turns);
+        ascolto_audio_chunker_feed(vad, sys, count, save_turn, turns);
     }
 }
 
@@ -195,11 +195,8 @@ static int verify_overflow_time(const char* directory) {
     app.files.mic_raw = tmpfile();
     app.files.sys_raw = tmpfile();
     ascolto_capture_buffer_t* buffer = ascolto_capture_buffer_create(6400);
-    ascolto_vad_config_t config = ascolto_vad_default_config();
-    config.min_speech_s = 0.30;
-    config.min_silence_s = 0.32;
-    ascolto_online_vad_t vad;
-    ascolto_online_vad_init(&vad, ASCOLTO_CHANNEL_SYS, &config);
+    ascolto_audio_chunker_t vad;
+    ascolto_audio_chunker_init(&vad, ASCOLTO_CHANNEL_SYS);
     turns_t turns = {0};
     float speech[3200], silence[3200] = {0};
     for (int i = 0; i < 3200; i++) speech[i] = 0.1f * sinf(2.0f * 3.14159265f * i / 80.0f);
@@ -210,7 +207,7 @@ static int verify_overflow_time(const char* directory) {
         drain_pcm(buffer, &app, &vad, &turns);
     }
     /* Pause the consumer while 3s of speech enters a 0.4s queue: the 2.6s gap
-       must close the first VAD turn and appear in both archived raw channels. */
+       must appear in both archived raw channels and reach the model unchanged. */
     for (int i = 0; i < 15; i++, cursor += 3200) {
         ascolto_capture_buffer_push(buffer, ASCOLTO_CHANNEL_SYS, speech, 3200, cursor);
         ascolto_capture_buffer_push(buffer, ASCOLTO_CHANNEL_MIC, silence, 3200, cursor);
@@ -221,10 +218,11 @@ static int verify_overflow_time(const char* directory) {
         ascolto_capture_buffer_push(buffer, ASCOLTO_CHANNEL_MIC, silence, 3200, cursor);
         drain_pcm(buffer, &app, &vad, &turns);
     }
+    ascolto_audio_chunker_flush(&vad, save_turn, &turns);
     bool pass = ascolto_capture_buffer_dropped(buffer) == 41600 &&
-                vad.total_samples_processed == cursor && app.vad_sys.total_samples_processed == cursor &&
-                app.vad_mic.total_samples_processed == cursor && turns.count == 2 &&
-                fabs(turns.starts[1] - 3.0) < 0.021 && turns.ends[0] < turns.starts[1] &&
+                vad.total_samples_processed == cursor && app.sys_chunks.total_samples_processed == cursor &&
+                app.mic_chunks.total_samples_processed == cursor && turns.count == 1 &&
+                turns.starts[0] == 0 && fabs(turns.ends[0] - (double)cursor / ASCOLTO_SAMPLE_RATE) < .001 &&
                 app.files.mic_raw && app.files.sys_raw &&
                 ftell(app.files.mic_raw) == cursor * (int64_t)sizeof(float) &&
                 ftell(app.files.sys_raw) == cursor * (int64_t)sizeof(float);
@@ -234,9 +232,9 @@ static int verify_overflow_time(const char* directory) {
         if (fread(&sample, sizeof(sample), 1, app.files.sys_raw) != 1 || sample != 0) pass = false;
         fseek(app.files.sys_raw, 0, SEEK_END);
     }
-    printf("[%s] Overflow preserves %.2fs, raw stereo length and two separate VAD turns\n",
+    printf("[%s] Overflow preserves %.2fs, raw stereo length and complete model input\n",
            pass ? "PASS" : "FAIL", (double)cursor / ASCOLTO_SAMPLE_RATE);
-    ascolto_online_vad_free(&vad);
+    ascolto_audio_chunker_free(&vad);
     ascolto_capture_buffer_free(buffer);
     ascolto_live_app_free(&app);
     return pass ? 0 : 1;

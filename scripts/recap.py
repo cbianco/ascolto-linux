@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Post-call pipeline for ascolto.
 
-1. Re-transcribe the per-channel FLAC files with an OpenAI STT model (chunked on silence,
-   so every chunk keeps a timestamp).
-2. Merge MIC (ME) and SYS (remote) by time and drop echo duplicates.
+1. Re-transcribe every sample of each channel with an OpenAI STT model in bounded windows.
+2. Merge MIC (ME) and SYS (remote) by time, preserving model output.
 3. Write the recap with the local Claude seat (`claude -p`, no API key).
 4. Optionally render a spoken version of the recap to MP3 with OpenAI TTS.
 
@@ -18,7 +17,6 @@ import fcntl
 import hashlib
 from pathlib import Path
 import concurrent.futures as futures
-import difflib
 import json
 import os
 import re
@@ -35,10 +33,7 @@ import numpy as np
 import requests
 
 SAMPLE_RATE = 16000
-FRAME = 480  # 30 ms
 OPENAI = "https://api.openai.com/v1"
-
-HALLUCINATION = re.compile(r"^(grazie( a tutti| mille)?|sottotitoli.*|ok|ciao)[.! ]*$", re.IGNORECASE)
 
 RECAP_SYSTEM = (
     "You turn a noisy automatic transcript of a work call into a faithful, professional recap. "
@@ -136,61 +131,13 @@ def write_wav(path, samples):
         w.writeframes(samples.astype(np.int16).tobytes())
 
 
-def find_chunks(samples, split_s=0.5, join_s=2.0, max_s=30.0, pad_s=0.25, min_s=0.4):
-    """Return (start_s, end_s) windows that contain speech.
-
-    Speech runs are split on pauses of at least split_s, then packed back into chunks of at most
-    max_s so each request keeps context. A run longer than max_s is cut at its quietest frame.
-    """
-    n = len(samples) // FRAME
-    if n == 0:
-        return []
-    frames = samples[: n * FRAME].astype(np.float64).reshape(n, FRAME)
-    rms = np.sqrt((frames ** 2).mean(axis=1))
-    thr = max(250.0, 2.5 * float(np.percentile(rms, 20)))
-    voiced = rms > thr
-    fps = SAMPLE_RATE / FRAME
-
-    runs, start = [], None
-    for i, v in enumerate(voiced):
-        if v and start is None:
-            start = i
-        elif not v and start is not None:
-            runs.append([start, i])
-            start = None
-    if start is not None:
-        runs.append([start, n])
-
-    merged = []
-    for r in runs:
-        if merged and (r[0] - merged[-1][1]) / fps < split_s:
-            merged[-1][1] = r[1]
-        else:
-            merged.append(r)
-
-    max_f = int(max_s * fps)
-    pieces = []
-    for a, b in merged:
-        while b - a > max_f:
-            lo, hi = a + int(0.5 * max_f), a + max_f
-            cut = lo + int(np.argmin(rms[lo:hi]))
-            pieces.append([a, cut])
-            a = cut
-        pieces.append([a, b])
-
-    packed = []
-    for a, b in pieces:
-        if packed and (a - packed[-1][1]) / fps < join_s and (b - packed[-1][0]) <= max_f:
-            packed[-1][1] = b
-        else:
-            packed.append([a, b])
-
-    out = []
-    for a, b in packed:
-        s, e = max(0.0, a / fps - pad_s), min(len(samples) / SAMPLE_RATE, b / fps + pad_s)
-        if e - s >= min_s:
-            out.append((s, e))
-    return out
+def find_chunks(samples, max_s=30.0):
+    """Cover all PCM, including silence, quiet onsets and a short final tail."""
+    window = int(max_s * SAMPLE_RATE)
+    if window <= 0:
+        raise ValueError("Audio window must be positive")
+    return [(start / SAMPLE_RATE, min(start + window, len(samples)) / SAMPLE_RATE)
+            for start in range(0, len(samples), window)]
 
 
 def transcribe_chunk(session, key, model, language, prompt, wav_path):
@@ -254,7 +201,7 @@ def transcribe_channel(flac, label_fn, args, key, tmp, tag):
                         "-ar", str(SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le", wav], check=True)
     samples = read_wav(wav)
     chunks = find_chunks(samples)
-    log(f"{tag}: {len(samples) / SAMPLE_RATE:.0f}s of audio, {len(chunks)} speech chunks")
+    log(f"{tag}: {len(samples) / SAMPLE_RATE:.0f}s of audio, {len(chunks)} audio windows")
     glossary = args.keywords.strip()
     prompt = f"Glossary: {glossary}" if glossary else None
     session = requests.Session()
@@ -262,7 +209,7 @@ def transcribe_channel(flac, label_fn, args, key, tmp, tag):
     def work(item):
         i, (s, e) = item
         p = os.path.join(tmp, f"{tag}_{i:04d}.wav")
-        write_wav(p, samples[int(s * SAMPLE_RATE): int(e * SAMPLE_RATE)])
+        write_wav(p, samples[round(s * SAMPLE_RATE): round(e * SAMPLE_RATE)])
         text = transcribe_chunk(session, key, args.stt_model, args.language, prompt, p)
         os.unlink(p)
         return s, e, text
@@ -270,25 +217,10 @@ def transcribe_channel(flac, label_fn, args, key, tmp, tag):
     out = []
     with futures.ThreadPoolExecutor(max_workers=4) as pool:
         for s, e, text in pool.map(work, enumerate(chunks)):
-            if not text or (HALLUCINATION.match(text) and e - s < 2.5):
+            if not text:
                 continue
             out.append({"start": s, "end": e, "text": text, "label": label_fn(s, e), "channel": tag})
     return out, len(samples) / SAMPLE_RATE
-
-
-def drop_echo(mic, sys_):
-    kept = []
-    for m in mic:
-        dup = False
-        for s in sys_:
-            ov = min(m["end"], s["end"]) - max(m["start"], s["start"])
-            if ov >= 0.6 * (m["end"] - m["start"]):
-                if difflib.SequenceMatcher(None, m["text"].lower(), s["text"].lower()).ratio() >= 0.55:
-                    dup = True
-                    break
-        if not dup:
-            kept.append(m)
-    return kept
 
 
 def run_claude(args, transcript):
@@ -499,7 +431,6 @@ def run(args):
                 sys_, dur = transcribe_channel(sys_flac, lambda s, e: speaker_for(whistle_sys, s, e), args, key, tmp, "sys")
                 seconds += dur
 
-        mic = drop_echo(mic, sys_)
         lines = sorted(mic + sys_, key=lambda c: c["start"])
         transcript = "\n".join(f"[{fmt_time(c['start'])}] [{c['label']}]: {c['text']}" for c in lines)
         if not transcript:

@@ -56,8 +56,8 @@ int main(void) {
         if (ascolto_control_start(app, actions)) failures++;
         /* Content-free capture/model diagnostics must stay readable even while
            session preparation or inference owns the processing lock. */
-        app->vad_mic.total_samples_processed = 320;
-        app->vad_sys.total_samples_processed = 640;
+        app->mic_chunks.total_samples_processed = 320;
+        app->sys_chunks.total_samples_processed = 640;
         app->capture_dropped_samples = 160;
         app->transcription_error = true;
         app->last_mic_rms_db = -25;

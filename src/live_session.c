@@ -61,8 +61,8 @@ static void publish_snapshot_unlocked(ascolto_live_app_t* app) {
     snapshot->utterances = app->session_utterance_count;
     snapshot->remote_speakers = app->diarizer.num_speakers;
     snapshot->session_start_s = app->session_start_epoch_s;
-    snapshot->mic_samples = app->vad_mic.total_samples_processed;
-    snapshot->sys_samples = app->vad_sys.total_samples_processed;
+    snapshot->mic_samples = app->mic_chunks.total_samples_processed;
+    snapshot->sys_samples = app->sys_chunks.total_samples_processed;
     snapshot->capture_dropped_samples = app->capture_dropped_samples;
     snapshot->mic_padding = app->capture_padded_samples[ASCOLTO_CHANNEL_MIC];
     pthread_mutex_unlock(&app->snapshot_lock);
@@ -73,18 +73,6 @@ void ascolto_live_app_read_snapshot(ascolto_live_app_t* app, ascolto_live_snapsh
     pthread_mutex_lock(&app->snapshot_lock);
     *snapshot = app->snapshot;
     pthread_mutex_unlock(&app->snapshot_lock);
-}
-
-bool ascolto_is_noise_hallucination(const ascolto_transcript_result_t *tr,
-    ascolto_channel_t channel, float rms_db, bool recent_sys_activity) {
-    if (!tr) return true;
-    float probability = 1.0f;
-    if (tr->num_words > 0) {
-        probability = 0;
-        for (int i = 0; i < tr->num_words; i++) probability += tr->words[i].probability;
-        probability /= tr->num_words;
-    }
-    return ascolto_transcript_is_noise(tr->text, tr->num_words, probability, channel, rms_db, recent_sys_activity);
 }
 
 /* Checkpoints contain no PCM. Their explicit version and source digest prevent
@@ -114,7 +102,7 @@ static int deferred_cached(ascolto_live_app_t *app, ascolto_channel_t channel,
     int rc = ascolto_deferred_segment_get(r->store, r->job->id, r->ordinal, &cached);
     if (rc == SQLITE_NOTFOUND) return 0;
     if (rc) return -1;
-    bool matches = cached.checkpoint_version == 1 && cached.checkpoint_size == sizeof(*checkpoint) &&
+    bool matches = cached.checkpoint_version == 2 && cached.checkpoint_size == sizeof(*checkpoint) &&
         !strcmp(cached.channel, ascolto_channel_name(channel)) &&
         cached.start_ms == (int64_t)(start * 1000 + 0.5) && cached.end_ms == (int64_t)(end * 1000 + 0.5);
     if (matches) matches = !memcmp(checkpoint->pcm_digest, cached.checkpoint, sizeof(checkpoint->pcm_digest));
@@ -131,7 +119,7 @@ static void deferred_commit(ascolto_live_app_t *app, ascolto_channel_t channel,
     if (!r || app->transcription_error) return;
     if (cached) { r->ordinal++; return; }
     ascolto_deferred_segment_t segment = {.ordinal = r->ordinal, .end_frame = r->position,
-        .channel = (char *)ascolto_channel_name(channel), .checkpoint_version = 1,
+        .channel = (char *)ascolto_channel_name(channel), .checkpoint_version = 2,
         .checkpoint = checkpoint, .checkpoint_size = sizeof(*checkpoint),
         .start_ms = (int64_t)(start * 1000 + 0.5), .end_ms = (int64_t)(end * 1000 + 0.5)};
     char metadata[512];
@@ -155,14 +143,12 @@ static void deferred_commit(ascolto_live_app_t *app, ascolto_channel_t channel,
     }
 }
 
-static void on_live_vad_turn(ascolto_channel_t channel, const float *pcm,
+static void on_audio_chunk(ascolto_channel_t channel, const float *pcm,
     int num_samples, double start_s, double end_s, float rms_db, void *userdata) {
     ascolto_live_app_t *app = userdata;
     if (!app || !app->whistle || !app->whistle->loaded || app->transcription_error) return;
     struct ascolto_deferred_replay_state *r = app->deferred_replay;
     if (r && (r->interrupted || r->should_stop(r->stop_context))) { r->interrupted = true; return; }
-    ascolto_mic_activity_t activity = app->echo.mic;
-    if (channel == ASCOLTO_CHANNEL_MIC) activity = ascolto_mic_activity_take(&app->echo.mic);
     char kw_buf[4096];
     if (!r) {
         ascolto_config_load_keywords(&app->config, kw_buf, sizeof(kw_buf));
@@ -197,11 +183,7 @@ static void on_live_vad_turn(ascolto_channel_t channel, const float *pcm,
         }
         if (tok < 0 || (app->local_stt.context && tok != 0)) { app->transcription_error = true; return; }
     }
-    double sys_stream_s = (double)app->vad_sys.total_samples_processed / ASCOLTO_SAMPLE_RATE;
-    double dt_sys_stream = app->last_sys_voiced_stream_s >= 0 ? sys_stream_s - app->last_sys_voiced_stream_s : 999;
-    if (dt_sys_stream < 0) dt_sys_stream = 0;
-    bool recent_sys = dt_sys_stream < 2.2 || activity.sys_frames > 0 || app->vad_sys.in_speech;
-    if (!tr->text[0] || ascolto_is_noise_hallucination(tr, channel, rms_db, recent_sys)) {
+    if (!tr->text[0]) {
         deferred_commit(app, channel, start_s, end_s, rms_db, &checkpoint, cached, NULL, 0, false);
         return;
     }
@@ -213,13 +195,6 @@ static void on_live_vad_turn(ascolto_channel_t channel, const float *pcm,
         free(emb);
         checkpoint.voiceprint_ready = true;
     }
-    if (channel == ASCOLTO_CHANNEL_MIC) {
-        if (ascolto_echo_filter_matches(&app->echo, tr->text, start_s, end_s, rms_db, &activity)) {
-            app->mic_echo_turns_suppressed++;
-            deferred_commit(app, channel, start_s, end_s, rms_db, &checkpoint, cached, NULL, 0, false);
-            return;
-        }
-    } else ascolto_echo_filter_remember(&app->echo, tr->text, start_s, end_s, rms_db);
     float sim = 1;
     bool is_new = false;
     const char *speaker = ascolto_diarizer_identify(&app->diarizer, channel, &checkpoint.voiceprint, &sim, &is_new);
@@ -245,32 +220,14 @@ int ascolto_live_app_init(ascolto_live_app_t* app, ascolto_whistle_t* whistle, c
     if (!app->local_models) return -1;
     ascolto_diarizer_init(&app->diarizer, app->config.diarizer_threshold);
 
-    /* Separate VAD tuning for MIC (capture normal desk voice down to -35.5 dB)
-       and SYS (shorter turns for responsive multi-speaker diarization) */
-    ascolto_vad_config_t mic_vad_cfg = ascolto_vad_default_config();
-    mic_vad_cfg.energy_threshold_db = -35.5f;
-    mic_vad_cfg.min_speech_s = 0.30;
-    mic_vad_cfg.min_silence_s = 0.32;
-    mic_vad_cfg.max_segment_s = 12.0;
-
-    ascolto_vad_config_t sys_vad_cfg = ascolto_vad_default_config();
-    sys_vad_cfg.energy_threshold_db = -35.0f;
-    sys_vad_cfg.min_speech_s = 0.35;
-    sys_vad_cfg.min_silence_s = 0.38;
-    sys_vad_cfg.max_segment_s = 10.0;
-
-    ascolto_online_vad_init(&app->vad_mic, ASCOLTO_CHANNEL_MIC, &mic_vad_cfg);
-    ascolto_online_vad_init(&app->vad_sys, ASCOLTO_CHANNEL_SYS, &sys_vad_cfg);
+    if (ascolto_audio_chunker_init(&app->mic_chunks, ASCOLTO_CHANNEL_MIC) ||
+        ascolto_audio_chunker_init(&app->sys_chunks, ASCOLTO_CHANNEL_SYS)) return -1;
 
     app->state = app->config.paused ? ASCOLTO_STATE_PAUSED : ASCOLTO_STATE_IDLE;
     app->sys_audio_permission_ok = false;
     app->last_mic_rms_db = -100.0f;
     app->last_sys_rms_db = -100.0f;
-    app->last_sys_voiced_stream_s = -10.0;
-    ascolto_echo_filter_reset(&app->echo);
     memset(app->pending_audio_count, 0, sizeof(app->pending_audio_count));
-    app->mic_bleed_frames_suppressed = 0;
-    app->mic_echo_turns_suppressed = 0;
     app->capture_dropped_samples = 0;
     memset(app->capture_padded_samples, 0, sizeof(app->capture_padded_samples));
     snprintf(app->active_mic_name, sizeof(app->active_mic_name), "Predefinito di sistema");
@@ -316,15 +273,11 @@ static int start_session_unlocked(ascolto_live_app_t* app, bool is_manual) {
     }
 
     ascolto_diarizer_init(&app->diarizer, app->config.diarizer_threshold);
-    ascolto_online_vad_reset(&app->vad_mic);
-    ascolto_online_vad_reset(&app->vad_sys);
+    ascolto_audio_chunker_reset(&app->mic_chunks);
+    ascolto_audio_chunker_reset(&app->sys_chunks);
 
-    ascolto_echo_filter_reset(&app->echo);
     memset(app->pending_audio_count, 0, sizeof(app->pending_audio_count));
     app->last_sys_rms_db = -100.0f;
-    app->last_sys_voiced_stream_s = -10.0;
-    app->mic_bleed_frames_suppressed = 0;
-    app->mic_echo_turns_suppressed = 0;
     app->capture_dropped_samples = 0;
     memset(app->capture_padded_samples, 0, sizeof(app->capture_padded_samples));
 
@@ -349,11 +302,11 @@ static int stop_session_unlocked(ascolto_live_app_t* app) {
         }
     }
     if (!app->deferred_worker) {
-        ascolto_online_vad_flush(&app->vad_sys, on_live_vad_turn, app);
-        ascolto_online_vad_flush(&app->vad_mic, on_live_vad_turn, app);
+        ascolto_audio_chunker_flush(&app->sys_chunks, on_audio_chunk, app);
+        ascolto_audio_chunker_flush(&app->mic_chunks, on_audio_chunk, app);
     }
 
-    double elapsed = (double)(app->vad_mic.total_samples_processed > app->vad_sys.total_samples_processed ? app->vad_mic.total_samples_processed : app->vad_sys.total_samples_processed) / ASCOLTO_SAMPLE_RATE;
+    double elapsed = (double)(app->mic_chunks.total_samples_processed > app->sys_chunks.total_samples_processed ? app->mic_chunks.total_samples_processed : app->sys_chunks.total_samples_processed) / ASCOLTO_SAMPLE_RATE;
 
     ascolto_transcript_close(app, elapsed);
     if (!app->deferred_worker) ascolto_local_stt_end(app->local_models, &app->local_stt);
@@ -558,7 +511,7 @@ static void process_audio_unlocked(
         if (app->deferred_worker) {
             /* The capture consumer does bounded disk work only. No ASR/VAD callbacks. */
             FILE *raw = channel == ASCOLTO_CHANNEL_MIC ? app->files.mic_raw : app->files.sys_raw;
-            ascolto_online_vad_t *timeline = channel == ASCOLTO_CHANNEL_MIC ? &app->vad_mic : &app->vad_sys;
+            ascolto_audio_chunker_t *timeline = channel == ASCOLTO_CHANNEL_MIC ? &app->mic_chunks : &app->sys_chunks;
             if (!raw || fwrite(samples, sizeof(float), (size_t)num_samples, raw) != (size_t)num_samples)
                 app->files.storage_error = SQLITE_IOERR_WRITE;
             timeline->total_samples_processed += num_samples;
@@ -571,60 +524,15 @@ static void process_audio_unlocked(
             return;
         }
         float chunk_db = ascolto_audio_rms_db(samples, num_samples);
-        const int frame_len = ASCOLTO_SAMPLE_RATE / 50; /* 20 ms = 320 samples */
 
         if (channel == ASCOLTO_CHANNEL_SYS) {
-            if (app->files.sys_raw) {
-                fwrite(samples, sizeof(float), (size_t)num_samples, app->files.sys_raw);
-            }
-            for (int idx = 0; idx < num_samples; idx += frame_len) {
-                int step = (idx + frame_len <= num_samples) ? frame_len : (num_samples - idx);
-                float f_db = ascolto_audio_rms_db(samples + idx, step);
-                app->echo.sys_db[app->echo.sys_frames % ASCOLTO_SYS_ENV_HISTORY] = f_db;
-                app->echo.sys_frames++;
-
-                if (f_db >= -36.5f) {
-                    double sys_t = (double)(app->vad_sys.total_samples_processed + idx + step) /
-                                   (double)ASCOLTO_SAMPLE_RATE;
-                    if (f_db > app->last_sys_rms_db || (sys_t - app->last_sys_voiced_stream_s) > 0.8) {
-                        app->last_sys_rms_db = f_db;
-                    } else {
-                        app->last_sys_rms_db = 0.92f * app->last_sys_rms_db + 0.08f * f_db;
-                    }
-                    app->last_sys_voiced_stream_s = sys_t;
-                }
-            }
-            ascolto_online_vad_feed(&app->vad_sys, samples, num_samples, on_live_vad_turn, app);
+            if (app->files.sys_raw) fwrite(samples, sizeof(float), (size_t)num_samples, app->files.sys_raw);
+            app->last_sys_rms_db = chunk_db;
+            ascolto_audio_chunker_feed(&app->sys_chunks, samples, num_samples, on_audio_chunk, app);
         } else {
-            if (app->files.mic_raw) {
-                fwrite(samples, sizeof(float), (size_t)num_samples, app->files.mic_raw);
-            }
+            if (app->files.mic_raw) fwrite(samples, sizeof(float), (size_t)num_samples, app->files.mic_raw);
             app->last_mic_rms_db = chunk_db;
-
-            /* Stage 1: timestamp-aligned 20ms energy gate with a bounded SYS lookback. */
-            for (int idx = 0; idx < num_samples; idx += frame_len) {
-                int step = (idx + frame_len <= num_samples) ? frame_len : (num_samples - idx);
-                float f_db = ascolto_audio_rms_db(samples + idx, step);
-
-                /* Address SYS history by stream sample position, independent of callback sizes.
-                   Only suppress MIC within 240ms of SYS speech and below SYS + 3.5 dB. */
-                float ref_sys_db;
-                bool sys_active_window = ascolto_bleed_reference(app->echo.sys_db, app->echo.sys_frames,
-                    app->vad_mic.total_samples_processed + step, app->vad_sys.total_samples_processed, &ref_sys_db);
-                bool is_bleed = sys_active_window && f_db < ref_sys_db + 3.5f;
-
-                if (is_bleed) {
-                    float zeros[320] = {0};
-                    ascolto_online_vad_feed(&app->vad_mic, zeros, step, on_live_vad_turn, app);
-                    if (f_db >= app->vad_mic.cfg.energy_threshold_db) {
-                        app->mic_bleed_frames_suppressed++;
-                    }
-                } else {
-                    ascolto_online_vad_feed(&app->vad_mic, samples + idx, step, on_live_vad_turn, app);
-                    ascolto_mic_activity_track(&app->echo.mic, app->vad_mic.in_speech,
-                                               sys_active_window, ref_sys_db);
-                }
-            }
+            ascolto_audio_chunker_feed(&app->mic_chunks, samples, num_samples, on_audio_chunk, app);
         }
     }
 }
@@ -676,8 +584,8 @@ void ascolto_live_app_free(ascolto_live_app_t* app) {
     app->deferred_worker = NULL;
     ascolto_archive_wait();
     pthread_mutex_lock(&app->lock);
-    ascolto_online_vad_free(&app->vad_mic);
-    ascolto_online_vad_free(&app->vad_sys);
+    ascolto_audio_chunker_free(&app->mic_chunks);
+    ascolto_audio_chunker_free(&app->sys_chunks);
     pthread_mutex_unlock(&app->lock);
     pthread_mutex_destroy(&app->lock);
     pthread_cond_destroy(&app->session_cond);
@@ -741,28 +649,24 @@ int ascolto_deferred_process_job(ascolto_live_app_t *app, ascolto_deferred_store
     app->config.diarizer_threshold = (float)job->diarizer_threshold;
     app->transcription_error = false;
     app->session_utterance_count = 0;
-    app->mic_bleed_frames_suppressed = app->mic_echo_turns_suppressed = 0;
     app->last_sys_rms_db = app->last_mic_rms_db = -100;
-    app->last_sys_voiced_stream_s = -10;
-    ascolto_echo_filter_reset(&app->echo);
     ascolto_diarizer_init(&app->diarizer, app->config.diarizer_threshold);
-    ascolto_online_vad_free(&app->vad_mic);
-    ascolto_online_vad_free(&app->vad_sys);
-    ascolto_vad_config_t mic = ascolto_vad_default_config(), sys = ascolto_vad_default_config();
-    mic.energy_threshold_db = -35.5f; mic.min_speech_s = .30; mic.min_silence_s = .32; mic.max_segment_s = 12;
-    sys.energy_threshold_db = -35; sys.min_speech_s = .35; sys.min_silence_s = .38; sys.max_segment_s = 10;
-    if (ascolto_online_vad_init(&app->vad_mic, ASCOLTO_CHANNEL_MIC, &mic) ||
-        ascolto_online_vad_init(&app->vad_sys, ASCOLTO_CHANNEL_SYS, &sys)) goto done;
+    if ((!app->mic_chunks.buffer && ascolto_audio_chunker_init(&app->mic_chunks, ASCOLTO_CHANNEL_MIC)) ||
+        (!app->sys_chunks.buffer && ascolto_audio_chunker_init(&app->sys_chunks, ASCOLTO_CHANNEL_SYS))) goto done;
+    ascolto_audio_chunker_reset(&app->mic_chunks);
+    ascolto_audio_chunker_reset(&app->sys_chunks);
     struct ascolto_deferred_replay_state replay = {.store = store, .job = job,
         .should_stop = should_stop, .stop_context = stop_context};
     app->deferred_replay = &replay;
     app->state = ASCOLTO_STATE_RECORDING;
-    for (int64_t position = 0; position < job->sample_count; position += ASCOLTO_FRAME_SAMPLES) {
+    /* Replay is file I/O, not capture: batch one second while preserving the
+     * same 30-second request boundaries, SYS/MIC order and progress cadence. */
+    for (int64_t position = 0; position < job->sample_count; position += ASCOLTO_SAMPLE_RATE) {
         if (should_stop(stop_context)) { result = 1; goto done; }
-        int n = (int)(job->sample_count - position > ASCOLTO_FRAME_SAMPLES ? ASCOLTO_FRAME_SAMPLES : job->sample_count - position);
+        int n = (int)(job->sample_count - position > ASCOLTO_SAMPLE_RATE ? ASCOLTO_SAMPLE_RATE : job->sample_count - position);
         replay.position = position + n;
         for (int ch = ASCOLTO_CHANNEL_SYS; ch >= ASCOLTO_CHANNEL_MIC; ch--) {
-            float samples[ASCOLTO_FRAME_SAMPLES] = {0};
+            float samples[ASCOLTO_SAMPLE_RATE] = {0};
             size_t count = fread(samples, sizeof(float), (size_t)n, source[ch]);
             if (count < (size_t)n && ferror(source[ch])) goto done;
             for (size_t i = 0; i < count; i++) if (!isfinite(samples[i])) goto done;
@@ -773,8 +677,8 @@ int ascolto_deferred_process_job(ascolto_live_app_t *app, ascolto_deferred_store
         if (replay.position % ASCOLTO_SAMPLE_RATE == 0 &&
             ascolto_deferred_progress(store, job->id, replay.position) != SQLITE_OK) goto done;
     }
-    ascolto_online_vad_flush(&app->vad_sys, on_live_vad_turn, app);
-    ascolto_online_vad_flush(&app->vad_mic, on_live_vad_turn, app);
+    ascolto_audio_chunker_flush(&app->sys_chunks, on_audio_chunk, app);
+    ascolto_audio_chunker_flush(&app->mic_chunks, on_audio_chunk, app);
     if (replay.interrupted || should_stop(stop_context)) { result = 1; goto done; }
     if (app->transcription_error || replay.ordinal < job->completed_segments) goto done;
     for (int ch = 0; ch < 2; ch++) {

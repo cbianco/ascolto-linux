@@ -91,7 +91,7 @@ int main(void) {
     pthread_join(duplicate, NULL);
     if (core->state != ASCOLTO_STATE_IDLE || atomic_load(&drain.stopped) != 2 || core->session_id != 1) failures++;
     for (int ch = 0; ch < 2; ch++) {
-        if (core->vad[ch].total_samples_processed != 16333) failures++;
+        if (core->chunks[ch].total_samples_processed != 16333) failures++;
         AVFormatContext *format = NULL;
         if (avformat_open_input(&format, core->current_audio_path[ch], NULL, NULL) ||
             avformat_find_stream_info(format, NULL) < 0 || format->streams[0]->duration != 16333) failures++;
@@ -106,7 +106,7 @@ int main(void) {
     const char *text = "The \"release\" is ready.\nNext task.";
     ascolto_core_ingest_audio(core, ASCOLTO_CHANNEL_MIC, pcm, 8000, 0.5, text);
     ascolto_core_stop(core);
-    if (core->vad[ASCOLTO_CHANNEL_MIC].total_samples_processed != 16000) failures++;
+    if (core->chunks[ASCOLTO_CHANNEL_MIC].total_samples_processed != 16000) failures++;
     JsonParser *parser = json_parser_new();
     FILE *trace=fopen(core->current_jsonl_path,"r");char line[8192];bool found=false;
     while(trace&&fgets(line,sizeof(line),trace)){
@@ -114,7 +114,7 @@ int main(void) {
         JsonObject *object=json_node_get_object(json_parser_get_root(parser));
         if(!object||!json_object_has_member(object,"text"))continue;
         found=true;
-        if(strcmp(json_object_get_string_member(object,"text"),text)||json_object_get_double_member(object,"start_sec")!=0.5)failures++;
+        if(strcmp(json_object_get_string_member(object,"text"),text)||json_object_get_double_member(object,"start_sec")!=0.0)failures++;
     }
     if(trace)fclose(trace);if(!found)failures++;g_object_unref(parser);
     ascolto_core_destroy(core);

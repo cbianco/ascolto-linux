@@ -13,7 +13,7 @@ retention of the compressed final archive. Failed/cancelled jobs retain sources.
 
 1. **Never use `ScreenCaptureKit` for `SYS` audio**: it triggers the macOS purple screen-sharing menu bar indicator and spawns `replayd`. Always use CoreAudio `CATapDescription` + `AudioHardwareCreateProcessTap`.
 2. **Call start/end detection**: do not rely on `kAudioDevicePropertyDeviceIsRunningSomewhere` while `Ascolto` is recording (it stays `true` because `Ascolto` itself holds the mic open). Always use `ascolto_macos_query_audio_apps()`, which checks `kAudioProcessPropertyIsRunningInput` excluding `getpid()` and system daemons (`CoreSpeech`, `replayd`, `audiomxd`, `controlcenter`).
-3. **Speaker Bleed Gate (`SYS -> MIC`)**: on a MacBook without headphones, built-in speaker audio couples into the built-in mic at up to `sys_rms_db + 1 dB`, whereas user speech at desk distance is `-25` to `-35 dB`. Only gate `MIC` while `SYS` is actively speaking (`< 250ms`) and `mic_db < sys_db + 3.5 dB`; when `SYS` is silent, keep `MIC` VAD threshold at `-35.5 dB`.
+3. **Model authority**: forward original MIC and SYS PCM without level-based speech selection, echo suppression, minimum speech duration or text rejection. Only the selected speech model decides what was said. Transport requests are contiguous and bounded to 30 seconds; final partial requests always flush. Preserve every nonempty model response, including greetings, repetitions and possible model errors. RMS is telemetry only. Acoustic playback can therefore appear on both channels; do not silently delete it.
 4. **macOS `.app` bundle environment**: `open bin/Ascolto.app` runs with `cwd=/` and `PATH=/usr/bin:/bin`. Always resolve model paths via `_NSGetExecutablePath` and prepend `/opt/homebrew/bin:/usr/local/bin` to `PATH` when invoking `ffmpeg`.
 5. **Call artifacts (`~/Documents/Ascolto/`)**: each new call owns a timestamped/title-based folder with `transcript.md`, `Data/transcript.jsonl`, `recap.md`, and `Audio/recording.m4a` (48kbps AAC stereo 16kHz: `Left=MIC`, `Right=SYS`, ~21 MB/hour).
 
@@ -44,7 +44,7 @@ retention of the compressed final archive. Failed/cancelled jobs retain sources.
 
 - `include/ascolto.h`: central API and state.
 - `capture_macos.c` / `mic_monitor.c`: capture, device inventory and call metadata.
-- `live_session.c`: lifecycle, VAD, bleed gate and ASR orchestration.
+- `live_session.c`: lifecycle, complete-audio request assembly and ASR orchestration.
 - `macos/transcript.c`: live transcript and raw-audio resources.
 - `macos/recap.c`: background compression, atomic publication and optional worker
   launch using argument-based spawning; shutdown waits off-main. Retain originals.

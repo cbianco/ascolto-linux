@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
-/* Replay lives beside the production VAD/filter/diarizer implementation. */
+/* Replay shares production audio request assembly, recognition and diarization. */
 extern int ascolto_deferred_process_job(ascolto_live_app_t *, ascolto_deferred_store_t *,
     const ascolto_deferred_job_t *, bool (*)(void *), void *);
 extern void ascolto_deferred_finalize_job(ascolto_live_app_t *, const ascolto_deferred_job_t *);
@@ -406,8 +406,8 @@ void ascolto_deferred_stop(ascolto_deferred_worker_t *worker) {
     if (!worker) return;
     ascolto_deferred_shutdown(worker);
     while (worker->commands) { deferred_command_t *next = worker->commands->next; free(worker->commands); worker->commands = next; }
-    ascolto_online_vad_free(&worker->context->vad_mic);
-    ascolto_online_vad_free(&worker->context->vad_sys);
+    ascolto_audio_chunker_free(&worker->context->mic_chunks);
+    ascolto_audio_chunker_free(&worker->context->sys_chunks);
     pthread_mutex_destroy(&worker->context->snapshot_lock);
     pthread_cond_destroy(&worker->context->session_cond);
     pthread_mutex_destroy(&worker->context->lock);

@@ -6,19 +6,19 @@
 #include <string.h>
 #include <time.h>
 #include <pthread.h>
-/* Production VAD/ASR/Whistle-embedding/SQLite path, without a capture device. */
+/* Complete-audio ASR/Whistle-embedding/SQLite path, without a capture device. */
 static int run_test(int argc,char **argv){
-    if(argc!=4&&argc!=5){fprintf(stderr,"usage: %s TEMP_CONFIG SPEECH_WAV WHISTLE_MODEL [MODEL_ID]\n",argv[0]);return 2;}
+    if(argc<4||argc>6){fprintf(stderr,"usage: %s TEMP_CONFIG SPEECH_WAV WHISTLE_MODEL [MODEL_ID [LANGUAGE]]\n",argv[0]);return 2;}
     ascolto_audio_buffer_t audio={0};if(ascolto_wav_load(argv[2],&audio)||audio.sample_rate!=16000)return 2;
     ascolto_whistle_t whistle;if(ascolto_whistle_init(&whistle,argv[3]))return 2;
     ascolto_config_t config;ascolto_config_init_defaults(&config);config.auto_trigger_mic=false;config.save_audio=false;
-    snprintf(config.config_path,sizeof(config.config_path),"%s",argv[1]);snprintf(config.output_dir,sizeof(config.output_dir),"%s-calls",argv[1]);snprintf(config.language,sizeof(config.language),"en");
+    snprintf(config.config_path,sizeof(config.config_path),"%s",argv[1]);snprintf(config.output_dir,sizeof(config.output_dir),"%s-calls",argv[1]);snprintf(config.language,sizeof(config.language),"%s",argc>=6?argv[5]:"en");
     if(ascolto_config_save(&config,NULL))return 2;
     ascolto_live_app_t app;if(ascolto_live_app_init(&app,&whistle,argv[1]))return 2;
     for(int n=0;n<6000;n++){ascolto_local_models_snapshot_t s;ascolto_local_models_snapshot(app.local_models,&s);bool busy=false;for(int i=1;i<ASCOLTO_LOCAL_MODEL_COUNT;i++)if(s.models[i].state==ASCOLTO_MODEL_CHECKING)busy=true;if(!busy)break;struct timespec wait={0,10000000};nanosleep(&wait,NULL);}
     const char *models[]={"whisper-turbo-q5","parakeet-v3-q8","qwen3-asr-1.7b"};int result=0;float silence[ASCOLTO_FRAME_SAMPLES]={0};
-    for(int engine=0;engine<(argc==5?1:3)&&!result;engine++){
-        const char *model=argc==5?argv[4]:models[engine];
+    for(int engine=0;engine<(argc>=5?1:3)&&!result;engine++){
+        const char *model=argc>=5?argv[4]:models[engine];
         if(ascolto_local_models_select(app.local_models,model)||ascolto_live_app_start_session(&app,true)){result=1;break;}
         /* Selecting another model must leave this session's decoder unchanged. */
         if(ascolto_local_models_select(app.local_models,"whistle")||strcmp(app.local_stt.id,model)){result=1;break;}
@@ -30,7 +30,7 @@ static int run_test(int argc,char **argv){
         if(ascolto_local_models_select(app.local_models,model)||ascolto_live_app_start_session(&app,true)){result=1;break;}
         for(int frame=0;frame<100;frame++){ascolto_live_app_feed_audio(&app,ASCOLTO_CHANNEL_SYS,silence,ASCOLTO_FRAME_SAMPLES);ascolto_live_app_feed_audio(&app,ASCOLTO_CHANNEL_MIC,silence,ASCOLTO_FRAME_SAMPLES);}
         if(ascolto_live_app_stop_session(&app)||app.session_utterance_count)result=1;
-        printf("Silence gate %s: %s\n",model,result?"FAIL":"PASS");fflush(stdout);
+        printf("Model silence response %s: %s\n",model,result?"FAIL":"PASS");fflush(stdout);
     }
     ascolto_live_app_free(&app);ascolto_whistle_free(&whistle);free(audio.samples);return result;
 }

@@ -25,14 +25,14 @@ static char *session_metadata(ascolto_live_app_t *app, bool manual,
     fprintf(
         out,
         "{\"manual\":%s,\"duration_s\":%.3f,\"utterances\":%d,\"remote_"
-        "speakers\":%d,\"bleed_frames\":%d,\"echo_turns\":%d,\"capture_dropped_"
+        "speakers\":%d,\"capture_dropped_"
         "samples\":%lld,\"padded_mic_samples\":%lld,\"padded_sys_samples\":%"
         "lld",
         manual ? "true" : "false", duration, app->session_utterance_count,
-        app->diarizer.num_speakers, app->mic_bleed_frames_suppressed,
-        app->mic_echo_turns_suppressed, (long long)app->capture_dropped_samples,
+        app->diarizer.num_speakers, (long long)app->capture_dropped_samples,
         (long long)app->capture_padded_samples[0],
         (long long)app->capture_padded_samples[1]);
+  fprintf(out, ",\"transcription_pipeline\":\"model-audio-chunks-v2\"");
   fprintf(out, ",\"local_model\":\"%s\",\"transcription_failed\":%s", app->local_stt.id, app->transcription_error ? "true" : "false");
   fprintf(out, ",\"post_call\":%s,\"retain_audio\":%s,\"cloud_recap\":%s,\"recap_tts\":%s",
           app->deferred_worker ? "true" : "false", app->files.retain_audio ? "true" : "false",

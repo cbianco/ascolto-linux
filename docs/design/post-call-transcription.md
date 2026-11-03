@@ -29,17 +29,25 @@ or inference fails. A new recording pauses replay between frames/segments; an
 adapter call already running finishes first. Recording never waits for that call.
 The loaded model may remain resident while replay is paused for another call.
 
-Replay feeds the production VAD, echo filter and native diarizer in paired 20 ms
-frames, SYS before MIC. VAD settings are unchanged: this avoids mixing a lifecycle
-change with an unvalidated segmentation/accuracy change. Longer-segment tuning is
-a separate optimization that needs corpus comparison.
+Replay reads paired one-second blocks, SYS before MIC, and assembles contiguous
+30-second requests independently for each channel. All original PCM reaches the
+selected model, including silence and very short final fragments. No energy VAD,
+MIC echo gate or text suppression runs before or after recognition. Native speaker
+embeddings remain separate from recognition. Only empty model responses produce
+no utterance. Request boundaries are transport limits, not inferred sentence or
+speaker boundaries.
+
+Replay reuses its two request buffers between jobs and retries. File-read batching
+does not change request PCM, checkpoint ordinals or the one-second progress cadence;
+cancellation is checked between reads and before each model request. Capture keeps
+its independent 20 ms queue frames.
 
 ## Recovery and publication
 
-Every deterministic VAD turn has an ordinal. A versioned checkpoint stores the
+Every deterministic audio request has an ordinal. A versioned checkpoint stores the
 ASR output, projected voiceprint and SHA-256 of that segment's PCM, including
-turns rejected by the existing filters. Checkpoint, accepted utterance and progress
-commit atomically. Restart replays PCM from the beginning to rebuild VAD, echo and
+empty model responses. Checkpoint, accepted utterance and progress
+commit atomically. Restart replays PCM from the beginning to rebuild request and
 speaker state, while completed checkpoints skip model inference and duplicate
 utterance insertion. Changed segment PCM or an incompatible checkpoint fails
 safely. Increment the checkpoint version when changing the replay algorithm or
@@ -62,6 +70,15 @@ transcription when archive retention is disabled. Startup retries interrupted
 finalization. An existing ready, readable archive is preserved even if a prior
 crash removed only one raw channel.
 
+Checkpoint format version 2 records the complete-audio request pipeline. Previous
+version-1 VAD checkpoints are incompatible and must never be reused as if they
+contained complete original audio. A partial old job fails safely and retains
+sources/committed text. A separate new transcription version can use the new
+pipeline when an eligible ready archive exists. The existing version UI cannot
+recover a raw-only interrupted job; those sources require manual recovery.
+Retry does not convert old checkpoints. Existing completed transcripts are not
+rewritten.
+
 Schema v2 adds dedicated native queue/checkpoint tables, separate from provider
 jobs. C and Python openers make owner-only SQLite backups before migrating v1.
 The app checks for an existing instance before bootstrap/migration; the currently
@@ -80,7 +97,7 @@ an adapter in the middle of inference.
 `make test-deferred` exercises persistent transactions/migration, worker
 scheduling, capture/replay, checkpoint reuse, source mutation, failure recovery
 and cleanup with synthetic PCM and mocked model/hardware calls. The pipeline test
-uses production VAD/filter/diarization/storage/export code. It does not establish
+uses production audio request/diarization/storage/export code. It does not establish
 recognition accuracy or physical capture reliability on arbitrary conversations.
 The existing macOS acoustic-room, lifecycle, socket, archive and smoke suites
 remain applicable. Shared database/store fixtures also run on Linux.

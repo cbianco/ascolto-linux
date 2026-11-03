@@ -240,6 +240,7 @@ static char *version_metadata(sqlite3 *db, const source_t *source, int64_t id,
         "SELECT json_set(?1,'$.native_transcription_source_session',?2,'$.retranscription',json('true'),"
         "'$.local_model',?3,'$.language',?4,'$.transcript_md',?5,'$.audio_m4a','','$.post_call',json('true'),"
         "'$.retain_audio',json('false'),'$.cloud_recap',json('false'),'$.recap_tts',json('false'),"
+        "'$.transcription_pipeline','model-audio-chunks-v2',"
         "'$.transcription_failed',json('false'),'$.audio_write_failed',json('false'),'$.utterances',0,'$.remote_speakers',0)",
         -1, &q, NULL) == SQLITE_OK) {
         bind_text(q, 1, source->metadata); sqlite3_bind_int64(q, 2, id);

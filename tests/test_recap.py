@@ -1,5 +1,6 @@
 """Local artifact adaptation and mocked cloud contracts; never uses real credentials."""
 import json
+from types import SimpleNamespace
 from pathlib import Path
 import subprocess
 import sys
@@ -19,6 +20,39 @@ class RecapTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="ascolto-recap-")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
+
+    def test_audio_windows_include_silence_and_short_tail(self):
+        samples = np.zeros(30 * recap.SAMPLE_RATE + 13, dtype=np.int16)
+        samples[:100] = 1
+        self.assertEqual(recap.find_chunks(samples), [(0, 30), (30, len(samples) / recap.SAMPLE_RATE)])
+        self.assertEqual(recap.find_chunks(samples[:13]), [(0, 13 / recap.SAMPLE_RATE)])
+        self.assertEqual(recap.find_chunks(samples[:0]), [])
+
+    def test_short_model_greeting_is_retained(self):
+        args = SimpleNamespace(flac2wav=None, ffmpeg="ffmpeg", keywords="", stt_model="fixture", language="it")
+        samples = np.zeros(recap.SAMPLE_RATE // 5, dtype=np.int16)
+        with patch.object(recap.subprocess, "run"), \
+             patch.object(recap, "read_wav", return_value=samples), \
+             patch.object(recap, "transcribe_chunk", return_value="Grazie."):
+            turns, duration = recap.transcribe_channel("fixture.flac", lambda a, b: "ME",
+                args, "fixture-key", str(self.directory), "mic")
+        self.assertEqual(duration, .2)
+        self.assertEqual([turn["text"] for turn in turns], ["Grazie."])
+
+    def test_audio_submitted_to_model_keeps_final_sample(self):
+        args = SimpleNamespace(flac2wav=None, ffmpeg="ffmpeg", keywords="", stt_model="fixture", language="it")
+        # 1001 / 16000 * 16000 rounds below 1001 in binary floating point.
+        samples = np.arange(1001, dtype=np.int16)
+        def recognize(session, key, model, language, prompt, path):
+            np.testing.assert_array_equal(recap.read_wav(path), samples)
+            return "Thanks."
+        read_wav = recap.read_wav
+        with patch.object(recap.subprocess, "run"), \
+             patch.object(recap, "read_wav", side_effect=lambda path: samples if str(path).endswith("mic.wav") else read_wav(path)), \
+             patch.object(recap, "transcribe_chunk", side_effect=recognize):
+            turns, _ = recap.transcribe_channel("fixture.flac", lambda a, b: "ME",
+                args, "fixture-key", str(self.directory), "mic")
+        self.assertEqual([turn["text"] for turn in turns], ["Thanks."])
 
     def archive(self):
         source = self.directory / "call 'quoted' $(unused).wav"

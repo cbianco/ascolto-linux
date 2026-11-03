@@ -156,13 +156,20 @@ cancellation or retry; a failed/cancelled retry retains completed segment result
 than 20 ms processing blocks. Job state and copied progress snapshots are read
 away from the main UI thread.
 
-The worker deterministically replays PCM from the start to rebuild VAD, echo and
-speaker state. Each completed segment has a contiguous ordinal and a versioned
+The worker deterministically replays PCM from the start to rebuild complete-audio
+requests and speaker state. Each original channel is sent to the selected model
+in contiguous windows of at most 30 seconds, with no speech/echo/text filters.
+Each completed segment has a contiguous ordinal and a versioned
 opaque checkpoint blob. The worker validates checkpoint version, size and source
-identity before reusing cached recognition. Accepted utterances, the segment
+identity before reusing cached recognition. Checkpoint version 2 prevents reuse
+of historical filtered
+VAD results as complete-audio results; incompatible partial jobs retain their
+sources and prior committed text. A separate new version requires an eligible
+ready archive; raw-only interrupted jobs currently require manual recovery.
+Nonempty model utterances, the segment
 checkpoint and the export-outbox request commit in one transaction. Repeated
 identical checkpoints are no-ops, preventing duplicate utterances after a crash.
-Rejected segments also retain checkpoints. A crash after recognition but before
+Empty model responses also retain checkpoints. A crash after recognition but before
 commit may rerun that incomplete segment. Terminal errors store only bounded
 ASCII error codes. The dedicated table does not enable cloud audio uploads.
 

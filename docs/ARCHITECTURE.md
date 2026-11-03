@@ -17,7 +17,7 @@ native orchestration.
 Native MIC/SYS capture
     -> timestamped paired PCM queue
     -> one audio consumer (SYS before MIC)
-    -> energy gate and streaming VAD
+    -> complete, contiguous audio requests (at most 30 seconds)
     -> selected in-process local ASR + Whistle speaker embeddings
     -> native speaker identification
     -> committed SQLite transcript + Markdown/JSONL export
@@ -36,12 +36,13 @@ capture drains every queued sample before transcript/audio resources close.
 - `audio_types.h`: sample rate, frame size, channel identity and naming.
 - `capture_buffer.c`: paired sample timeline, padding and overflow accounting.
 - `audio_queue.c`: threaded paired consumer used by the Linux backend.
-- `audio_processing.c`: RMS, streaming VAD, recent SYS envelope lookup, transcript
-  filtering, MIC activity statistics and recent SYS turn history. Both controllers
-  use the same echo state and matching rules; native VAD tuning stays explicit.
+- `audio_processing.c`: RMS telemetry and bounded, lossless audio request assembly.
+  Both controllers forward all samples, including silence and quiet speech, to the
+  selected model. No energy/echo gate or lexical/hallucination filter edits input
+  or discards nonempty model text.
 - `deferred_store.c` and `macos/deferred.c`: persistent post-call jobs, checkpoints,
   cancellation, recovery and copied worker progress. macOS production capture
-  bypasses ASR; replay uses the same VAD/filter/diarizer stages.
+  bypasses ASR; replay uses the same complete-audio request assembly and diarizer.
 - `local_stt.c` / `local_stt/`: copied model catalog state, background verified
   downloads, session-frozen engine selection and isolated native adapters. See
   [LOCAL_STT.md](LOCAL_STT.md).
@@ -100,10 +101,9 @@ remains independent and uses the controller's synchronized entry points.
 
 ## Offline tools and verification
 
-`offline.h` contains WAV, simulated-monitor, offline segmentation and report
-contracts. `session.c` supports simulation and archive reprocessing, including
-legacy recordings with channel startup/callback drift. Its alignment path is
-intentionally separate from the timestamped live pipeline.
+`offline.h` contains WAV, simulated-monitor, acoustic inspection and report
+contracts. `session.c` supports simulation and archive reprocessing, forwarding
+each channel's samples and recorded offsets without heuristic drift alignment.
 
 The macOS app excludes WAV utilities, the simulated monitor, offline session/VAD,
 acoustic rooms and the deterministic queue verifier. The harness links these

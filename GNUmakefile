@@ -10,10 +10,23 @@ $(error Unsupported platform '$(ASCOLTO_PLATFORM)'; expected Darwin or Linux)
 endif
 
 .PHONY: test-portable
+ifeq ($(ASCOLTO_PLATFORM),Darwin)
+PORTABLE_DEAD_STRIP := -Wl,-dead_strip
+else
+PORTABLE_DEAD_STRIP := -Wl,--gc-sections
+endif
 test-portable:
 	@mkdir -p bin
 	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Iinclude src/capture_buffer.c src/audio_queue.c src/audio_processing.c tests/capture_buffer_verify.c tests/portable_main.c -o bin/ascolto-portable-test -lpthread -lm
 	./bin/ascolto-portable-test
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -Ithird_party/whistle src/whistle_engine.c tests/whistle_model_output.c -o bin/ascolto-whistle-output-test -lpthread -lm
+	./bin/ascolto-whistle-output-test
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -ffunction-sections -fdata-sections -Iinclude src/core.c src/audio_processing.c src/diarizer.c src/types_config.c tests/linux_core_audio.c $(PORTABLE_DEAD_STRIP) -o bin/ascolto-linux-core-audio-test -lpthread -lm
+	./bin/ascolto-linux-core-audio-test
+ifeq ($(ASCOLTO_PLATFORM),Darwin)
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -DASCOLTO_TEST_MACOS -Iinclude -Ivendor/needle src/macos/whistle_engine.c tests/whistle_model_output.c -o bin/ascolto-whistle-output-macos-test -lm
+	./bin/ascolto-whistle-output-macos-test
+endif
 
 # Compare both algorithms against identical PCM using the host's Needle library.
 ifeq ($(ASCOLTO_PLATFORM),Darwin)

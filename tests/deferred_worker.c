@@ -33,7 +33,7 @@ void ascolto_local_models_snapshot(ascolto_local_models_t *models, ascolto_local
 void ascolto_live_app_read_snapshot(ascolto_live_app_t *app, ascolto_live_snapshot_t *out) {
     pthread_mutex_lock(&app->snapshot_lock); *out=app->snapshot; pthread_mutex_unlock(&app->snapshot_lock);
 }
-void ascolto_online_vad_free(ascolto_online_vad_t *vad) { free(vad->buffer); memset(vad,0,sizeof(*vad)); }
+void ascolto_audio_chunker_free(ascolto_audio_chunker_t *vad) { free(vad->buffer); memset(vad,0,sizeof(*vad)); }
 int ascolto_deferred_process_job(ascolto_live_app_t *app, ascolto_deferred_store_t *store,
     const ascolto_deferred_job_t *job, bool (*stop)(void *), void *context) {
     (void)app; atomic_fetch_add(&entered,1);

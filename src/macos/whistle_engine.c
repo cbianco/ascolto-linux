@@ -29,7 +29,7 @@ static const char* json_extract_string(const char* src, const char* key, char* d
         }
     }
     dst[i] = '\0';
-    return (*p == '"') ? (p + 1) : p;
+    return (*p == '"') ? (p + 1) : NULL;
 }
 
 static double json_extract_number(const char* src, const char* key, double fallback) {
@@ -43,18 +43,18 @@ static double json_extract_number(const char* src, const char* key, double fallb
     return strtod(p, NULL);
 }
 
-static void parse_whistle_json(const char* json, ascolto_transcript_result_t* out) {
+static int parse_whistle_json(const char* json, ascolto_transcript_result_t* out) {
     memset(out, 0, sizeof(*out));
     snprintf(out->raw_json, sizeof(out->raw_json), "%s", json ? json : "");
-    if (!json) return;
+    if (!json) return -1;
 
-    json_extract_string(json, "text", out->text, sizeof(out->text));
+    if (!json_extract_string(json, "text", out->text, sizeof(out->text))) return -1;
     json_extract_string(json, "language", out->language, sizeof(out->language));
     out->ttft_ms = (float)json_extract_number(json, "ttft_ms", 0.0);
     out->decode_tps = (float)json_extract_number(json, "decode_tps", 0.0);
 
     const char* words_p = strstr(json, "\"words\":[");
-    if (!words_p) return;
+    if (!words_p) return 0;
     words_p += strlen("\"words\":[");
 
     int count = 0;
@@ -81,6 +81,7 @@ static void parse_whistle_json(const char* json, ascolto_transcript_result_t* ou
         cur = obj_end + 1;
     }
     out->num_words = count;
+    return 0;
 }
 
 int ascolto_whistle_init(ascolto_whistle_t* w, const char* model_path) {
@@ -161,7 +162,7 @@ int ascolto_whistle_transcribe(
     if (rc < 0) {
         return rc;
     }
-    parse_whistle_json(json_buf, out_result);
+    if (parse_whistle_json(json_buf, out_result)) return -1;
     return rc;
 }
 
