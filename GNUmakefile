@@ -135,4 +135,9 @@ test-nemotron-ssd:
 	python3 tests/test_nemotron_prepare.py build/local-stt/nemotron/bin/ascolto-nemotron-prepare
 	python3 -m unittest discover -s tests -p test_nemotron_prefill.py
 	python3 -m unittest discover -s tests -p test_nemotron_eval.py
+	python3 -m unittest discover -s tests -p test_nemotron_openrouter.py
 	python3 -m unittest discover -s tests -p test_nemotron_queue_replay.py
+
+.PHONY: test-nemotron-openrouter
+test-nemotron-openrouter:
+	python3 -m unittest discover -s tests -p test_nemotron_openrouter.py

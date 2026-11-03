@@ -334,3 +334,8 @@ On the M3 Max / 36 GB development Mac, Q8 SSD completed the small comparison in
 input), with maximum observed footprints of 7.70 versus 9.94 GB. Both produced
 the same normalized words, including the same public-clip proper-name error.
 See [protocol, numerical checks and limits](design/nemotron-q8-comparison.md).
+
+For an explicit same-audio comparison with the hosted model, see
+[native Nemotron versus OpenRouter](design/nemotron-openrouter-validation.md).
+Its offline fixtures and opt-in API driver use frozen public/synthetic references
+and the shipped native C ABI without changing application settings.
