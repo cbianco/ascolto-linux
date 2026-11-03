@@ -29,13 +29,28 @@ or inference fails. A new recording pauses replay between frames/segments; an
 adapter call already running finishes first. Recording never waits for that call.
 The loaded model may remain resident while replay is paused for another call.
 
-Replay reads paired one-second blocks, SYS before MIC, and assembles contiguous
-30-second requests independently for each channel. All original PCM reaches the
-selected model, including silence and very short final fragments. No energy VAD,
-MIC echo gate or text suppression runs before or after recognition. Native speaker
+Replay reads paired one-second blocks, processes 20 ms frames SYS before MIC, and
+assembles contiguous 30-second requests independently for each channel. New jobs
+use SpeexDSP 1.2.1 to cancel acoustic speaker bleed on a working MIC copy using SYS
+as the reference. Original capture, SYS and the final audio archive are unchanged.
+No energy VAD or text suppression runs before or after recognition. Native speaker
 embeddings remain separate from recognition. Only empty model responses produce
 no utterance. Request boundaries are transport limits, not inferred sentence or
-speaker boundaries.
+speaker boundaries. Silence and very short final fragments retain their positions.
+
+The native filter has a 256 ms acoustic tail and residual echo suppression, with
+AGC and general noise suppression disabled. It runs continuously to preserve
+adaptation across requests. When the linear canceller does not demonstrate at
+least 3 dB of removal over roughly 100 ms, output crossfades to original MIC;
+this protects quiet local speech with an uncorrelated headphone reference. It
+does not gate speech or replace intervals with silence. The residual processor's
+one-frame internal delay is compensated and explicitly drained, including a
+partial final frame. Short replies and double talk are regression cases.
+
+Cancellation is not perfect: startup convergence, clipping, changing acoustic
+paths, delays beyond the filter tail and lossy archive encoding can leave audible
+echo. The model can still transcribe that residual. No lexical deduplication or
+speaker-label rewriting hides it. This does not add word-level diarization.
 
 Replay reuses its two request buffers between jobs and retries. File-read batching
 does not change request PCM, checkpoint ordinals or the one-second progress cadence;
@@ -48,7 +63,7 @@ Every deterministic audio request has an ordinal. A versioned checkpoint stores 
 ASR output, projected voiceprint and SHA-256 of that segment's PCM, including
 empty model responses. Checkpoint, accepted utterance and progress
 commit atomically. Restart replays PCM from the beginning to rebuild request and
-speaker state, while completed checkpoints skip model inference and duplicate
+speaker and echo-filter state, while completed checkpoints skip model inference and duplicate
 utterance insertion. Changed segment PCM or an incompatible checkpoint fails
 safely. Increment the checkpoint version when changing the replay algorithm or
 payload representation.
@@ -70,7 +85,11 @@ transcription when archive retention is disabled. Startup retries interrupted
 finalization. An existing ready, readable archive is preserved even if a prior
 crash removed only one raw channel.
 
-Checkpoint format version 2 records the complete-audio request pipeline. Previous
+Checkpoint format version 3 records native AEC; its MIC digest covers both original
+source PCM and the effective model input. Version 2 records the original-audio
+request pipeline. Jobs with a version-2 first checkpoint finish using that same
+pipeline, without mixing processing versions. New calls and new re-transcriptions
+use version 3. Previous
 version-1 VAD checkpoints are incompatible and must never be reused as if they
 contained complete original audio. A partial old job fails safely and retains
 sources/committed text. A separate new transcription version can use the new
@@ -101,6 +120,11 @@ uses production audio request/diarization/storage/export code. It does not estab
 recognition accuracy or physical capture reliability on arbitrary conversations.
 The existing macOS acoustic-room, lifecycle, socket, archive and smoke suites
 remain applicable. Shared database/store fixtures also run on Linux.
+`make test-echo` exercises delayed/reflected playback, quiet simultaneous replies,
+headphones, deterministic reconstruction, invalid PCM and exact final drain. The
+SpeexDSP [source pin](https://github.com/xiph/speexdsp/tree/1b28a0f61bc31162979e1f26f3981fc3637095c8)
+is built statically by `scripts/build_echo.sh`; its BSD license
+is included in the app bundle. No additional runtime installation is required.
 
 ## Re-transcribing a saved call
 

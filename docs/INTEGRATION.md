@@ -8,10 +8,12 @@ history and adds the existing macOS sources as a descendant.
 
 ## Current transcription policy
 
-Since 2026-11-03, the application forwards complete, contiguous original audio to
-the selected model in bounded 30-second requests. Native and legacy cloud paths
-no longer select speech by energy, suppress MIC echo, reject greetings/repetitions
-or remove similar cross-channel text. The gate/VAD/filter descriptions below
+The application forwards complete, contiguous timelines to the selected model
+in bounded 30-second requests. New macOS post-call jobs cancel acoustic speaker
+bleed on a working MIC copy using native SpeexDSP; original capture, SYS and
+archives are preserved. Linux, live harnesses, legacy cloud and in-flight
+version-2 jobs retain original PCM. No path selects speech by energy, rejects
+greetings/repetitions or removes similar cross-channel text. The gate/VAD/filter descriptions below
 record the historical integration, not the current transcription path. Native
 capture, persistence and platform boundaries remain unchanged. See [local speech
 engines](LOCAL_STT.md) for request-boundary and speaker-attribution limits.

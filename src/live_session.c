@@ -4,10 +4,12 @@
 #include "ascolto/filesystem.h"
 #include "ascolto/deferred_store.h"
 #include "ascolto/ai_settings.h"
+#include "ascolto/echo.h"
 #include <fcntl.h>
 #include <CommonCrypto/CommonDigest.h>
 
 #include <ctype.h>
+#include <errno.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,6 +92,8 @@ struct ascolto_deferred_replay_state {
     bool (*should_stop)(void *);
     void *stop_context;
     bool interrupted;
+    unsigned checkpoint_version;
+    int mic_source;
 };
 
 static int deferred_cached(ascolto_live_app_t *app, ascolto_channel_t channel,
@@ -97,12 +101,35 @@ static int deferred_cached(ascolto_live_app_t *app, ascolto_channel_t channel,
                            deferred_checkpoint_t *checkpoint) {
     struct ascolto_deferred_replay_state *r = app->deferred_replay;
     if (!r) return 0;
-    CC_SHA256(pcm, (CC_LONG)((size_t)count * sizeof(float)), checkpoint->pcm_digest);
+    if (r->checkpoint_version == 3 && channel == ASCOLTO_CHANNEL_MIC) {
+        /* Bind the checkpoint to both original and processed MIC. Reading with
+         * pread leaves replay's source cursor untouched; bounded blocks also
+         * preserve the worker's small stack. Missing source tails are silence. */
+        CC_SHA256_CTX digest;
+        CC_SHA256_Init(&digest);
+        int64_t offset = llround(start * ASCOLTO_SAMPLE_RATE);
+        for (int position = 0; position < count; position += ASCOLTO_FRAME_SAMPLES) {
+            float original[ASCOLTO_FRAME_SAMPLES] = {0};
+            int n = count - position;
+            if (n > ASCOLTO_FRAME_SAMPLES) n = ASCOLTO_FRAME_SAMPLES;
+            size_t bytes = (size_t)n * sizeof(float), received = 0;
+            while (received < bytes) {
+                ssize_t read = pread(r->mic_source, (char *)original + received, bytes - received,
+                    (off_t)((offset + position) * sizeof(float) + received));
+                if (read < 0) { if (errno == EINTR) continue; return -1; }
+                if (!read) break;
+                received += (size_t)read;
+            }
+            CC_SHA256_Update(&digest, original, (CC_LONG)bytes);
+        }
+        CC_SHA256_Update(&digest, pcm, (CC_LONG)((size_t)count * sizeof(float)));
+        CC_SHA256_Final(checkpoint->pcm_digest, &digest);
+    } else CC_SHA256(pcm, (CC_LONG)((size_t)count * sizeof(float)), checkpoint->pcm_digest);
     ascolto_deferred_segment_t cached = {0};
     int rc = ascolto_deferred_segment_get(r->store, r->job->id, r->ordinal, &cached);
     if (rc == SQLITE_NOTFOUND) return 0;
     if (rc) return -1;
-    bool matches = cached.checkpoint_version == 2 && cached.checkpoint_size == sizeof(*checkpoint) &&
+    bool matches = cached.checkpoint_version == r->checkpoint_version && cached.checkpoint_size == sizeof(*checkpoint) &&
         !strcmp(cached.channel, ascolto_channel_name(channel)) &&
         cached.start_ms == (int64_t)(start * 1000 + 0.5) && cached.end_ms == (int64_t)(end * 1000 + 0.5);
     if (matches) matches = !memcmp(checkpoint->pcm_digest, cached.checkpoint, sizeof(checkpoint->pcm_digest));
@@ -119,13 +146,14 @@ static void deferred_commit(ascolto_live_app_t *app, ascolto_channel_t channel,
     if (!r || app->transcription_error) return;
     if (cached) { r->ordinal++; return; }
     ascolto_deferred_segment_t segment = {.ordinal = r->ordinal, .end_frame = r->position,
-        .channel = (char *)ascolto_channel_name(channel), .checkpoint_version = 2,
+        .channel = (char *)ascolto_channel_name(channel), .checkpoint_version = r->checkpoint_version,
         .checkpoint = checkpoint, .checkpoint_size = sizeof(*checkpoint),
         .start_ms = (int64_t)(start * 1000 + 0.5), .end_ms = (int64_t)(end * 1000 + 0.5)};
     char metadata[512];
     snprintf(metadata, sizeof(metadata),
-        "{\"is_new_speaker\":%s,\"similarity\":%.3f,\"f0_hz\":%.1f,\"rms_db\":%.1f,\"ttft_ms\":null,\"local_model\":\"%s\",\"post_call\":true}",
-        is_new ? "true" : "false", sim, checkpoint->voiceprint.f0_mean_hz, rms, app->local_stt.id);
+        "{\"is_new_speaker\":%s,\"similarity\":%.3f,\"f0_hz\":%.1f,\"rms_db\":%.1f,\"ttft_ms\":null,\"local_model\":\"%s\",\"post_call\":true,\"echo_cancellation\":%s}",
+        is_new ? "true" : "false", sim, checkpoint->voiceprint.f0_mean_hz, rms, app->local_stt.id,
+        channel == ASCOLTO_CHANNEL_MIC && r->checkpoint_version == 3 ? "\"speexdsp-1.2.1\"" : "null");
     ascolto_db_utterance_t turn = {.session_id = r->job->session_id,
         .start_ms = segment.start_ms, .end_ms = segment.end_ms, .channel = segment.channel,
         .speaker_label = speaker, .text = checkpoint->transcript.text,
@@ -633,6 +661,8 @@ int ascolto_deferred_process_job(ascolto_live_app_t *app, ascolto_deferred_store
     const char *paths[2] = {job->mic_path, job->sys_path};
     struct stat original[2];
     int result = -1;
+    ascolto_echo_t *echo = NULL;
+    unsigned checkpoint_version = 3;
     for (int ch = 0; ch < 2; ch++) {
         int fd = open(paths[ch], O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
         if (fd < 0) goto done;
@@ -642,6 +672,16 @@ int ascolto_deferred_process_job(ascolto_live_app_t *app, ascolto_deferred_store
         source[ch] = fdopen(fd, "rb");
         if (!source[ch]) { close(fd); goto done; }
     }
+    /* In-flight complete-audio jobs retain their original pipeline on upgrade.
+     * New calls and explicit re-transcriptions use version 3 with native AEC. */
+    if (job->completed_segments) {
+        ascolto_deferred_segment_t first = {0};
+        int rc = ascolto_deferred_segment_get(store, job->id, 0, &first);
+        if (!rc) checkpoint_version = first.checkpoint_version;
+        ascolto_deferred_segment_clear(&first);
+        if (rc || (checkpoint_version != 2 && checkpoint_version != 3)) goto done;
+    }
+    if (checkpoint_version == 3 && !(echo = ascolto_echo_create())) goto done;
     memset(&app->files, 0, sizeof(app->files));
     app->files.database_session = job->session_id;
     if (deferred_job_metadata(app, store, job)) goto done;
@@ -656,26 +696,55 @@ int ascolto_deferred_process_job(ascolto_live_app_t *app, ascolto_deferred_store
     ascolto_audio_chunker_reset(&app->mic_chunks);
     ascolto_audio_chunker_reset(&app->sys_chunks);
     struct ascolto_deferred_replay_state replay = {.store = store, .job = job,
-        .should_stop = should_stop, .stop_context = stop_context};
+        .should_stop = should_stop, .stop_context = stop_context,
+        .checkpoint_version = checkpoint_version, .mic_source = fileno(source[ASCOLTO_CHANNEL_MIC])};
     app->deferred_replay = &replay;
     app->state = ASCOLTO_STATE_RECORDING;
-    /* Replay is file I/O, not capture: batch one second while preserving the
-     * same 30-second request boundaries, SYS/MIC order and progress cadence. */
+    /* Batch file I/O, then cancel only the working MIC in paired 20 ms frames.
+     * Replay reconstructs AEC from sample zero even when ASR is checkpointed. */
     for (int64_t position = 0; position < job->sample_count; position += ASCOLTO_SAMPLE_RATE) {
         if (should_stop(stop_context)) { result = 1; goto done; }
         int n = (int)(job->sample_count - position > ASCOLTO_SAMPLE_RATE ? ASCOLTO_SAMPLE_RATE : job->sample_count - position);
-        replay.position = position + n;
+        float samples[2][ASCOLTO_SAMPLE_RATE] = {{0}};
         for (int ch = ASCOLTO_CHANNEL_SYS; ch >= ASCOLTO_CHANNEL_MIC; ch--) {
-            float samples[ASCOLTO_SAMPLE_RATE] = {0};
-            size_t count = fread(samples, sizeof(float), (size_t)n, source[ch]);
+            size_t count = fread(samples[ch], sizeof(float), (size_t)n, source[ch]);
             if (count < (size_t)n && ferror(source[ch])) goto done;
-            for (size_t i = 0; i < count; i++) if (!isfinite(samples[i])) goto done;
-            process_audio_unlocked(app, (ascolto_channel_t)ch, samples, n);
-            if (replay.interrupted) { result = 1; goto done; }
-            if (app->transcription_error) goto done;
+            for (size_t i = 0; i < count; i++) if (!isfinite(samples[ch][i])) goto done;
+        }
+        if (echo) {
+            for (int offset = 0; offset < n; offset += ASCOLTO_FRAME_SAMPLES) {
+                int count = n - offset;
+                if (count > ASCOLTO_FRAME_SAMPLES) count = ASCOLTO_FRAME_SAMPLES;
+                replay.position = position + offset + count;
+                process_audio_unlocked(app, ASCOLTO_CHANNEL_SYS, samples[ASCOLTO_CHANNEL_SYS] + offset, count);
+                if (replay.interrupted) { result = 1; goto done; }
+                if (app->transcription_error) goto done;
+                float clean[ASCOLTO_FRAME_SAMPLES];
+                int produced = ascolto_echo_process(echo, samples[ASCOLTO_CHANNEL_MIC] + offset,
+                    samples[ASCOLTO_CHANNEL_SYS] + offset, count, clean);
+                if (produced < 0) goto done;
+                process_audio_unlocked(app, ASCOLTO_CHANNEL_MIC, clean, produced);
+                if (replay.interrupted) { result = 1; goto done; }
+                if (app->transcription_error) goto done;
+            }
+        } else {
+            replay.position = position + n;
+            for (int ch = ASCOLTO_CHANNEL_SYS; ch >= ASCOLTO_CHANNEL_MIC; ch--) {
+                process_audio_unlocked(app, (ascolto_channel_t)ch, samples[ch], n);
+                if (replay.interrupted) { result = 1; goto done; }
+                if (app->transcription_error) goto done;
+            }
         }
         if (replay.position % ASCOLTO_SAMPLE_RATE == 0 &&
             ascolto_deferred_progress(store, job->id, replay.position) != SQLITE_OK) goto done;
+    }
+    if (echo) {
+        float clean[ASCOLTO_FRAME_SAMPLES];
+        int count = ascolto_echo_finish(echo, clean);
+        if (count < 0) goto done;
+        process_audio_unlocked(app, ASCOLTO_CHANNEL_MIC, clean, count);
+        if (replay.interrupted) { result = 1; goto done; }
+        if (app->transcription_error) goto done;
     }
     ascolto_audio_chunker_flush(&app->sys_chunks, on_audio_chunk, app);
     ascolto_audio_chunker_flush(&app->mic_chunks, on_audio_chunk, app);
@@ -710,6 +779,7 @@ int ascolto_deferred_process_job(ascolto_live_app_t *app, ascolto_deferred_store
     if (rc || ascolto_storage_publish(ascolto_deferred_store_database(store), job->session_id)) goto done;
     result = 0;
 done:
+    ascolto_echo_destroy(echo);
     app->deferred_replay = NULL;
     app->state = ASCOLTO_STATE_IDLE;
     for (int ch = 0; ch < 2; ch++) if (source[ch]) fclose(source[ch]);

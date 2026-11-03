@@ -14,7 +14,9 @@ This personal fork tracks [Voloire/ascolto-linux](https://github.com/Voloire/asc
 and includes the existing native macOS application. `make` selects the host platform
 through `GNUmakefile`; Linux source paths and its native `Makefile` are preserved.
 See [macOS setup](README.macos.md) and the [feature comparison and integration plan](docs/INTEGRATION.md).
-Both platforms now use the same queue, VAD, and live echo filters. Optional cloud
+Both platforms share the paired capture queue and complete-audio request assembly.
+macOS post-call transcription cancels speaker bleed on a working microphone copy
+while preserving original recordings. Optional cloud
 recap preserves local artifacts, and macOS exposes compatible CLI commands. See
 [macOS setup and opt-in recap](README.macos.md) for platform-specific configuration.
 

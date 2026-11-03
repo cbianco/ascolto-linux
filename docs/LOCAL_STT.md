@@ -16,15 +16,17 @@ queued audio requests have drained.
 | Nemotron 3.5 Transcribe Q8_0 SSD | 36,675,056,006 bytes | Native NeMo decoder with bounded SSD cache | Completed mono turn |
 | Nemotron 3.5 Transcribe BF16 SSD | 67,496,016,428 bytes; 66,115,974,854 installed | Native NeMo decoder with bounded SSD cache | Completed mono turn; experimental high delay |
 
-All decoders receive contiguous, original 16 kHz mono audio requests of at most
-30 seconds. Every sample reaches the model, including quiet onsets, short replies,
-silence, simultaneous speech and the final partial request. SYS precedes MIC and
+All decoders receive contiguous 16 kHz mono audio requests of at most
+30 seconds, covering quiet onsets, short replies, silence, simultaneous speech
+and the final partial request. New macOS post-call jobs apply native reference-based
+echo cancellation to a working MIC copy; SYS, capture and archives remain original.
+Linux, live harnesses and in-flight version-2 jobs use original PCM. SYS precedes MIC and
 processing stays serialized; capture only enqueues. Whistle extracts speaker
 embeddings independently. These adapters return text and a language when available.
 No word timestamps, probabilities or first-token measurements are fabricated.
-There are no application energy/echo gates or lexical/hallucination/repetition
-filters. Every nonempty model result is retained verbatim. Playback echo and model
-hallucinations can therefore remain visible rather than being silently removed.
+There are no application speech gates or lexical/hallucination/repetition
+filters. Every nonempty model result is retained verbatim. Residual playback echo
+and model hallucinations can still appear; no text is deleted to conceal them.
 Parakeet uses automatic language detection and does not apply keyword prompts.
 
 The 30-second transport bound is not sentence segmentation. A sentence or a

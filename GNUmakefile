@@ -9,6 +9,18 @@ else
 $(error Unsupported platform '$(ASCOLTO_PLATFORM)'; expected Darwin or Linux)
 endif
 
+.PHONY: test-echo
+build/echo/libspeexdsp.a: scripts/build_echo.sh src/echo/CMakeLists.txt
+	sh scripts/build_echo.sh
+
+build/echo/SPEEXDSP-LICENSE.txt: build/echo/libspeexdsp.a
+	cp build/echo/speexdsp/COPYING $@
+
+test-echo: build/echo/libspeexdsp.a
+	@mkdir -p bin
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -Ibuild/echo/speexdsp/include -Ibuild/echo/native src/echo.c tests/echo.c build/echo/libspeexdsp.a -lm -o bin/ascolto-echo-test
+	./bin/ascolto-echo-test
+
 .PHONY: test-portable
 ifeq ($(ASCOLTO_PLATFORM),Darwin)
 PORTABLE_DEAD_STRIP := -Wl,-dead_strip

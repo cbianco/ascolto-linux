@@ -17,6 +17,7 @@ static int checks, asr_calls, begin_calls, fail_call, stop_after, mutated, archi
 static const char *mutate_path;
 static bool authority_fixture;
 static bool complete_fixture;
+static bool echo_fixture;
 static int fixture_samples = 170 * ASCOLTO_FRAME_SAMPLES;
 static float *expected_pcm[2];
 static int expected_count;
@@ -35,6 +36,29 @@ void ascolto_local_stt_end(ascolto_local_models_t *models,ascolto_local_stt_t *s
 int ascolto_local_stt_transcribe(ascolto_local_models_t *models,ascolto_local_stt_t *session,const float *pcm,int count,const char *language,const char *keywords,ascolto_stt_text_t *out) {
     (void)models;(void)session;(void)language;(void)keywords;
     asr_calls++; if(asr_calls==fail_call)return -1;
+    if(echo_fixture) {
+        int offset=((asr_calls-1)/2)*ASCOLTO_TRANSCRIPTION_CHUNK_SECONDS*ASCOLTO_SAMPLE_RATE;
+        int remaining=expected_count-offset;
+        int expected=remaining>ASCOLTO_TRANSCRIPTION_CHUNK_SECONDS*ASCOLTO_SAMPLE_RATE?
+            ASCOLTO_TRANSCRIPTION_CHUNK_SECONDS*ASCOLTO_SAMPLE_RATE:remaining;
+        CHECK(asr_calls<=6);CHECK(count==expected);
+        if(asr_calls%2) CHECK(!memcmp(pcm,expected_pcm[ASCOLTO_CHANNEL_SYS]+offset,(size_t)count*sizeof(float)));
+        else if(asr_calls==2) {
+            double raw=0,clean=0,dot=0,local=0;
+            for(int i=ASCOLTO_SAMPLE_RATE;i<2*ASCOLTO_SAMPLE_RATE;i++) {
+                raw+=expected_pcm[ASCOLTO_CHANNEL_MIC][i]*expected_pcm[ASCOLTO_CHANNEL_MIC][i];
+                clean+=pcm[i]*pcm[i];
+            }
+            CHECK(clean<raw*.02);
+            for(int i=3*ASCOLTO_SAMPLE_RATE;i<4*ASCOLTO_SAMPLE_RATE;i++) {
+                float near=.004f*sinf(i*.31f);dot+=pcm[i]*near;local+=near*near;
+            }
+            CHECK(dot/local>.65);
+        }
+        if(asr_calls==6)CHECK(fabsf(pcm[count-1])>.001f);
+        snprintf(out->text,sizeof(out->text),"%s",asr_calls%2?"Remote fixture statement.":"Hello. Yes, yes, yes. Quiet local reply.");
+        snprintf(out->language,sizeof(out->language),"en");return 0;
+    }
     if(complete_fixture) {
         int chunk = (asr_calls - 1) / 2;
         int offset = chunk * ASCOLTO_TRANSCRIPTION_CHUNK_SECONDS * ASCOLTO_SAMPLE_RATE;
@@ -90,6 +114,20 @@ static void capture_fixture(ascolto_live_app_t *app) {
         for(int i=0;i<ASCOLTO_FRAME_SAMPLES;i++) {
             sys[i]=voiced?.10f*sinf(2.f*3.14159265358979323846f*(frame<80?220.f:330.f)*(frame*ASCOLTO_FRAME_SAMPLES+i)/ASCOLTO_SAMPLE_RATE):0;
             mic[i]=authority_fixture?.001f*cosf((float)(frame*ASCOLTO_FRAME_SAMPLES+i)/12):0;
+            if(echo_fixture) {
+                int sample=position+i;
+                /* A reproducible broadband reference and delayed acoustic path. */
+                uint32_t random=(uint32_t)sample*747796405u+2891336453u;
+                random=((random>>((random>>28)+4))^random)*277803737u;
+                random=(random>>22)^random;
+                sys[i]=sample<35*ASCOLTO_SAMPLE_RATE?((float)(random>>8)/16777216-.5f)*.3f:0;
+                int delayed=sample-480;
+                random=(uint32_t)delayed*747796405u+2891336453u;
+                random=((random>>((random>>28)+4))^random)*277803737u;
+                random=(random>>22)^random;
+                mic[i]=delayed>=0&&delayed<35*ASCOLTO_SAMPLE_RATE?((float)(random>>8)/16777216-.5f)*.18f:0;
+                if(sample>=2*ASCOLTO_SAMPLE_RATE)mic[i]+=(sample<4*ASCOLTO_SAMPLE_RATE?.004f:.04f)*sinf(sample*.31f);
+            }
         }
         ascolto_live_app_feed_audio(app,ASCOLTO_CHANNEL_SYS,sys,count);
         ascolto_live_app_feed_audio(app,ASCOLTO_CHANNEL_MIC,mic,count);
@@ -152,6 +190,15 @@ static void *run_pipeline(void *context) {
     expected_count=(int)job.sample_count;
     expected_pcm[ASCOLTO_CHANNEL_MIC]=(float*)read_text(job.mic_path);
     expected_pcm[ASCOLTO_CHANNEL_SYS]=(float*)read_text(job.sys_path);
+    /* Simulate an in-flight version 2 job on upgrade: its already-committed SYS
+     * checkpoint is unchanged, and the remaining MIC must still use raw PCM. */
+    stop_after=1;
+    CHECK(ascolto_deferred_process_job(replay,store,&job,stop_replay,NULL)==1);CHECK(asr_calls==1);
+    sqlite3_stmt *legacy=NULL;
+    CHECK(!sqlite3_prepare_v2(ascolto_db_sqlite(ascolto_deferred_store_database(store)),
+        "UPDATE native_transcription_segments SET checkpoint_version=2 WHERE job_id=?1",-1,&legacy,NULL));
+    sqlite3_bind_int64(legacy,1,job.id);CHECK(sqlite3_step(legacy)==SQLITE_DONE);sqlite3_finalize(legacy);
+    CHECK(!ascolto_deferred_defer(store,job.id));ascolto_deferred_job_clear(&job);claim(store,&job);stop_after=0;
     CHECK(!ascolto_deferred_process_job(replay,store,&job,stop_replay,NULL));CHECK(asr_calls==2);
     CHECK(scalar(store,"SELECT count(*) FROM utterances WHERE text='Buongiorno.'")==1);
     CHECK(scalar(store,"SELECT count(*) FROM utterances WHERE text='Sì, sì, sì, sì, sì, poi tieni premuto L.'")==1);
@@ -188,6 +235,28 @@ static void *run_pipeline(void *context) {
     }
     CHECK(!ascolto_deferred_finish(store,job.id,"completed",NULL));ascolto_deferred_job_clear(&job);
     free(expected_pcm[0]);free(expected_pcm[1]);complete_fixture=false;
+    /* The actual deferred consumer cancels echo, retains a quiet overlapping
+     * reply and model repetitions, preserves SYS/raw files and resumes after a
+     * committed SYS request without resetting AEC at the MIC boundary. */
+    asr_calls=0;echo_fixture=true;fixture_samples=60*ASCOLTO_SAMPLE_RATE+13;
+    capture_fixture(capture);claim(store,&job);expected_count=(int)job.sample_count;
+    expected_pcm[0]=(float*)read_text(job.mic_path);expected_pcm[1]=(float*)read_text(job.sys_path);
+    stop_after=1;CHECK(ascolto_deferred_process_job(replay,store,&job,stop_replay,NULL)==1);CHECK(asr_calls==1);
+    CHECK(!ascolto_deferred_defer(store,job.id));ascolto_deferred_job_clear(&job);claim(store,&job);stop_after=0;
+    CHECK(!ascolto_deferred_process_job(replay,store,&job,stop_replay,NULL));CHECK(asr_calls==6);
+    CHECK(scalar(store,"SELECT count(*) FROM utterances WHERE text='Hello. Yes, yes, yes. Quiet local reply.' AND json_extract(metadata_json,'$.echo_cancellation')='speexdsp-1.2.1'")==3);
+    CHECK(!ascolto_deferred_process_job(replay,store,&job,stop_replay,NULL));CHECK(asr_calls==6);
+    char *raw_mic=read_text(job.mic_path),*raw_sys=read_text(job.sys_path);
+    CHECK(!memcmp(raw_mic,expected_pcm[0],(size_t)expected_count*sizeof(float)));
+    CHECK(!memcmp(raw_sys,expected_pcm[1],(size_t)expected_count*sizeof(float)));
+    free(raw_mic);free(raw_sys);
+    /* Even a change below the processor's PCM16 precision invalidates the
+     * original-source hash, rather than reusing an unchanged cleaned digest. */
+    FILE *changed_mic=fopen(job.mic_path,"r+b");CHECK(changed_mic);float tiny=1e-10f;
+    CHECK(fwrite(&tiny,sizeof(tiny),1,changed_mic)==1);CHECK(!fclose(changed_mic));
+    CHECK(ascolto_deferred_process_job(replay,store,&job,stop_replay,NULL)==-1);CHECK(asr_calls==6);
+    CHECK(!ascolto_deferred_finish(store,job.id,"failed","fixture_source_changed"));ascolto_deferred_job_clear(&job);
+    free(expected_pcm[0]);free(expected_pcm[1]);echo_fixture=false;
     ascolto_deferred_store_close(store);ascolto_audio_chunker_free(&capture->mic_chunks);ascolto_audio_chunker_free(&capture->sys_chunks);ascolto_audio_chunker_free(&replay->mic_chunks);ascolto_audio_chunker_free(&replay->sys_chunks);pthread_mutex_destroy(&capture->snapshot_lock);pthread_cond_destroy(&capture->session_cond);pthread_mutex_destroy(&capture->lock);free(capture);free(replay);
     printf("Deferred pipeline: %d checks passed\n",checks);return NULL;
 }

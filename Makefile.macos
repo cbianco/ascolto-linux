@@ -2,7 +2,7 @@
 CC       := clang
 CFLAGS   := -std=c11 -O2 -Wall -Wextra -Iinclude -Ivendor/needle
 OBJCFLAGS:= -O2 -Wall -Wextra -Iinclude -Ivendor/needle -fobjc-arc
-LDFLAGS  := vendor/needle/libneedle.a -lc++ -lsqlite3 -lcurl \
+LDFLAGS  := vendor/needle/libneedle.a build/echo/libspeexdsp.a -lc++ -lsqlite3 -lcurl \
             -framework CoreAudio \
             -framework AudioToolbox \
             -framework AVFoundation \
@@ -14,7 +14,7 @@ LDFLAGS  := vendor/needle/libneedle.a -lc++ -lsqlite3 -lcurl \
 # Keep offline simulation and acoustic fixtures out of the shipped app.
 SESSION_SRCS := src/deferred_store.c src/macos/deferred.c src/local_stt.c src/database.c src/storage.c src/ai_settings.c src/filesystem.c src/diagnostics.c src/config.c src/mic_monitor.c \
                 src/macos/whistle_engine.c src/macos/diarizer.c src/macos/recap.c \
-                src/live_session.c src/macos/transcript.c src/capture_buffer.c src/audio_processing.c
+                src/live_session.c src/macos/transcript.c src/capture_buffer.c src/audio_processing.c src/echo.c
 CAPTURE_SRCS := src/capture_macos.c
 OFFLINE_SRCS := src/wav_audio.c tests/capture_buffer_verify.c src/simulated_monitor.c src/vad.c src/session.c src/room_bench.c
 APP_SRCS := src/macos/retranscribe.c $(SESSION_SRCS) $(CAPTURE_SRCS) src/macos/control.m src/macos/settings.m src/macos/activity.m src/menubar_macos.m src/app_main.c
@@ -46,11 +46,14 @@ RUNTIME_FILES := scripts/recap.py scripts/ai_providers.py scripts/ai_workflows.p
 
 all: build bundle
 
-deps:
+deps: build/echo/libspeexdsp.a
 	@mkdir -p vendor/needle models
 	@test -f vendor/needle/needle.h || curl -fL https://huggingface.co/Cactus-Compute/needle3/resolve/main/macos-arm64/needle.h -o vendor/needle/needle.h
 	@test -f vendor/needle/libneedle.a || curl -fL https://huggingface.co/Cactus-Compute/needle3/resolve/main/macos-arm64/libneedle.a -o vendor/needle/libneedle.a
 	@test -f models/whistle.cact || curl -fL https://huggingface.co/Cactus-Compute/whistle/resolve/main/whistle.cact -o models/whistle.cact
+
+$(OBJ_DIR)/src/echo.o: OBJCFLAGS += -Ibuild/echo/speexdsp/include -Ibuild/echo/native
+$(APP_BIN) $(HARNESS) $(REGRESSION) $(BIN_DIR)/ascolto-control-test $(BIN_DIR)/ascolto-history-test $(BIN_DIR)/ascolto-local-stt-pipeline: build/echo/libspeexdsp.a
 
 fixtures:
 	@chmod +x scripts/gen_fixtures.sh
@@ -96,11 +99,12 @@ bundle: $(BUNDLE_STAMP)
 assets/Ascolto.icns: assets/ascolto-app-icon.png scripts/build_app_icon.sh
 	@sh scripts/build_app_icon.sh
 
-$(BUNDLE_STAMP): $(APP_BIN) models/whistle.cact $(RUNTIME_FILES) assets/chatgpt-logo.svg assets/Ascolto.icns $(LOCAL_STT_LIBS) $(wildcard .venv/.ascolto-runtime-ready) Makefile.macos
+$(BUNDLE_STAMP): $(APP_BIN) models/whistle.cact $(RUNTIME_FILES) assets/chatgpt-logo.svg assets/Ascolto.icns $(LOCAL_STT_LIBS) $(wildcard .venv/.ascolto-runtime-ready) Makefile.macos build/echo/SPEEXDSP-LICENSE.txt
 	@mkdir -p $(APP_BUNDLE)/Contents/MacOS $(APP_BUNDLE)/Contents/Resources
 	@cp $(APP_BIN) $(APP_BUNDLE)/Contents/MacOS/Ascolto
 	@cp assets/chatgpt-logo.svg $(APP_BUNDLE)/Contents/Resources/
 	@cp assets/Ascolto.icns $(APP_BUNDLE)/Contents/Resources/Ascolto.icns
+	@cp build/echo/SPEEXDSP-LICENSE.txt $(APP_BUNDLE)/Contents/Resources/
 	@if test -d bin/local-stt; then rm -rf $(APP_BUNDLE)/Contents/Resources/local-stt; mkdir -p $(APP_BUNDLE)/Contents/Resources/local-stt; cp -R bin/local-stt/. $(APP_BUNDLE)/Contents/Resources/local-stt/; fi
 	@cp models/whistle.cact $(APP_BUNDLE)/Contents/Resources/whistle.cact
 	@cp $(RUNTIME_FILES) $(APP_BUNDLE)/Contents/Resources/
@@ -222,12 +226,12 @@ $(BIN_DIR)/ascolto-deferred-worker-test: $(DEFERRED_STORE_TEST_SRCS) src/macos/d
 	@mkdir -p $(BIN_DIR)
 	$(CC) -std=c11 -Wall -Wextra -O2 -Iinclude $(DEFERRED_STORE_TEST_SRCS) src/macos/deferred.c tests/deferred_worker.c -lsqlite3 -lpthread -o $@
 
-$(BIN_DIR)/ascolto-deferred-pipeline-test: $(DEFERRED_STORE_TEST_SRCS) src/config.c src/audio_processing.c src/macos/diarizer.c src/live_session.c src/macos/transcript.c tests/deferred_pipeline.c include/ascolto.h include/ascolto/deferred_store.h src/database_schema.inc
+$(BIN_DIR)/ascolto-deferred-pipeline-test: $(DEFERRED_STORE_TEST_SRCS) src/config.c src/audio_processing.c src/echo.c src/macos/diarizer.c src/live_session.c src/macos/transcript.c tests/deferred_pipeline.c include/ascolto.h include/ascolto/echo.h include/ascolto/deferred_store.h src/database_schema.inc build/echo/libspeexdsp.a
 	@mkdir -p $(BIN_DIR)
-	$(CC) -std=c11 -Wall -Wextra -O2 -Iinclude $(DEFERRED_STORE_TEST_SRCS) src/config.c src/audio_processing.c src/macos/diarizer.c src/live_session.c src/macos/transcript.c tests/deferred_pipeline.c -lsqlite3 -lpthread -lm -o $@
+	$(CC) -std=c11 -Wall -Wextra -O2 -Iinclude -Ibuild/echo/speexdsp/include -Ibuild/echo/native $(DEFERRED_STORE_TEST_SRCS) src/config.c src/audio_processing.c src/echo.c src/macos/diarizer.c src/live_session.c src/macos/transcript.c tests/deferred_pipeline.c build/echo/libspeexdsp.a -lsqlite3 -lpthread -lm -o $@
 
 .PHONY: test-startup-guard
-test: test-deferred test-startup-guard
+test: test-deferred test-startup-guard test-echo
 test-startup-guard: $(APP_BIN)
 	ASCOLTO_STARTUP_TEST_BINARY=$(APP_BIN) python3 -m unittest discover -s tests -p 'test_startup_guard.py'
 

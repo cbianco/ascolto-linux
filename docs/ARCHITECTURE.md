@@ -37,9 +37,12 @@ capture drains every queued sample before transcript/audio resources close.
 - `capture_buffer.c`: paired sample timeline, padding and overflow accounting.
 - `audio_queue.c`: threaded paired consumer used by the Linux backend.
 - `audio_processing.c`: RMS telemetry and bounded, lossless audio request assembly.
-  Both controllers forward all samples, including silence and quiet speech, to the
-  selected model. No energy/echo gate or lexical/hallucination filter edits input
-  or discards nonempty model text.
+  Both controllers preserve the full timeline, including silence and quiet speech.
+  No energy gate or lexical/hallucination filter discards input or model text.
+- `echo.c`: native SpeexDSP acoustic echo cancellation on the working MIC copy
+  of new macOS post-call jobs. SYS and source archives stay original. Internal
+  latency is drained and compensated, preserving exact sample counts. Live Linux
+  and macOS harness paths retain original PCM.
 - `deferred_store.c` and `macos/deferred.c`: persistent post-call jobs, checkpoints,
   cancellation, recovery and copied worker progress. macOS production capture
   bypasses ASR; replay uses the same complete-audio request assembly and diarizer.

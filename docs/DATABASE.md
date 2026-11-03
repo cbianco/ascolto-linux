@@ -157,12 +157,15 @@ than 20 ms processing blocks. Job state and copied progress snapshots are read
 away from the main UI thread.
 
 The worker deterministically replays PCM from the start to rebuild complete-audio
-requests and speaker state. Each original channel is sent to the selected model
-in contiguous windows of at most 30 seconds, with no speech/echo/text filters.
+requests, speaker state and the acoustic echo canceller. Requests cover each
+channel in contiguous windows of at most 30 seconds, with no speech/text gates.
+Version-3 jobs cancel speaker bleed on a working MIC copy; SYS stays original.
 Each completed segment has a contiguous ordinal and a versioned
 opaque checkpoint blob. The worker validates checkpoint version, size and source
-identity before reusing cached recognition. Checkpoint version 2 prevents reuse
-of historical filtered
+identity before reusing cached recognition. Version 3 binds MIC to both original
+and processed PCM. In-flight version-2 jobs retain their original PCM behavior;
+replay chooses the version from their first checkpoint. Both versions prevent reuse
+of historical version-1 filtered
 VAD results as complete-audio results; incompatible partial jobs retain their
 sources and prior committed text. A separate new version requires an eligible
 ready archive; raw-only interrupted jobs currently require manual recovery.

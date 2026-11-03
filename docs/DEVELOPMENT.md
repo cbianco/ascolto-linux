@@ -92,6 +92,12 @@ or live recognition. Run just the lightweight scoring/replay fixtures with
 
 ## Native post-call queue
 
+`make test-echo` builds the pinned native SpeexDSP dependency and checks speaker
+bleed cancellation, quiet double talk, headphone passthrough, deterministic replay
+and exact partial-tail drainage. macOS links it statically; capture and archives
+stay original. `make test-deferred` additionally verifies processed MIC/original
+SYS at the model boundary, checkpoint resume and legacy version-2 compatibility.
+
 `make test-deferred` verifies the durable native store, worker and production
 capture/replay pipeline using synthetic PCM and model stubs. It covers checkpoint
 resume without duplicate inference or utterances, cancellation, model reuse,
